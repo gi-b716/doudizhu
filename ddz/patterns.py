@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, Sequence
+from typing import Iterable, Mapping, Sequence
 
 from . import cards as C
 from .explain import describe_pattern
@@ -26,7 +26,7 @@ __all__ = [
     "SINGLE", "PAIR", "TRIPLE", "TRIPLE_SINGLE", "TRIPLE_PAIR",
     "STRAIGHT", "PAIR_STRAIGHT", "PLANE", "PLANE_SINGLE", "PLANE_PAIR",
     "FOUR_TWO", "FOUR_TWO_PAIR", "BOMB", "ROCKET",
-    "TYPE_NAMES", "BODY_PER_RANK", "SIZE_PER_LENGTH",
+    "TYPE_NAMES", "PLATFORM_TYPES", "BODY_PER_RANK", "SIZE_PER_LENGTH",
     "Pattern", "classify", "classify_one", "classify_beating",
     "beats", "is_bomb", "explodes_multiplier",
 ]
@@ -50,6 +50,19 @@ TYPE_NAMES: tuple[str, ...] = (
     SINGLE, PAIR, TRIPLE, TRIPLE_SINGLE, TRIPLE_PAIR, STRAIGHT, PAIR_STRAIGHT,
     PLANE, PLANE_SINGLE, PLANE_PAIR, FOUR_TWO, FOUR_TWO_PAIR, BOMB, ROCKET,
 )
+
+#: 平台 ``src/doudizhu-rules.js`` 的牌型名（``DoudizhuRules.TYPE_NAMES`` 的键）。
+#: 自动出牌要提交 ``choice=<平台 patternKey>``，所以这份映射是对接平台的关键。
+PLATFORM_TYPES: dict[str, str] = {
+    SINGLE: "single", PAIR: "pair", TRIPLE: "trio",
+    TRIPLE_SINGLE: "trio1", TRIPLE_PAIR: "trio2",
+    STRAIGHT: "straight", PAIR_STRAIGHT: "pairs", PLANE: "plane",
+    PLANE_SINGLE: "plane1", PLANE_PAIR: "plane2",
+    FOUR_TWO: "four2", FOUR_TWO_PAIR: "four22",
+    BOMB: "bomb", ROCKET: "rocket",
+}
+#: 反向：平台牌型名 → 我们的牌型名。
+_TYPES_FROM_PLATFORM = {v: k for k, v in PLATFORM_TYPES.items()}
 
 #: 无翅膀牌型的固定张数。
 _FIXED_SIZE = {
@@ -97,6 +110,43 @@ class Pattern:
     def key(self) -> str:
         """稳定、可 JSON 存储、可 grep 的读法标识，如 ``triple:9:1`` / ``straight:0:5``。"""
         return f"{self.type}:{self.main_rank}:{self.length}"
+
+    def top_rank(self) -> int:
+        """链条的最高点数（非链条就是主体点数）。"""
+        return self.main_rank + self.length - 1 if self.length > 1 else self.main_rank
+
+    def platform_key(self) -> str:
+        """平台 ``DoudizhuRules.patternKey`` 的格式：``类型:最大点数:长度``。
+
+        客户端出牌时提交 ``choice=<这个字符串>``，所以**自动出牌必须用它**——不能用我们
+        自己的 :meth:`key`：类型名不同（``trio1`` vs ``triple_single``），而且链条记的是
+        最高点数而不是最低（``straight:4:5`` 是 34567）。
+        """
+        return f"{PLATFORM_TYPES[self.type]}:{self.top_rank()}:{self.length}"
+
+    def to_platform(self) -> dict:
+        """平台 pattern 对象的形状（``{type, rank, len}``），便于对照与测试。"""
+        return {"type": PLATFORM_TYPES[self.type], "rank": self.top_rank(), "len": self.length}
+
+    @classmethod
+    def from_platform(cls, raw) -> "Pattern | None":
+        """平台的 ``{type, rank, len}`` → 我们的 Pattern；认不出返回 ``None``。
+
+        平台的 ``rank`` 是链条的**最高**点数，这里换算回我们的最低点数。
+        """
+        if not isinstance(raw, Mapping):
+            return None
+        type_name = _TYPES_FROM_PLATFORM.get(str(raw.get("type", "")).strip())
+        if type_name is None:
+            return None
+        top = raw.get("rank")
+        length = raw.get("len", 1)
+        if not isinstance(top, int) or not isinstance(length, int) or length < 1:
+            return None
+        try:
+            return cls(type_name, top - length + 1, length)
+        except ValueError:
+            return None
 
     def label(self) -> str:
         """ASCII 简写，用于日志与断言信息。"""

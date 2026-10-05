@@ -58,8 +58,9 @@
     })();
 
     // engine: 'heuristic' | 'douzero'（两个引擎选项；douzero 要等 Phase 4 权重就位）
+    // auto: **一个总开关**——叫分、出牌、续局全归它管；delayMs 是出手前的可视延迟
     const config = Object.assign(
-        {collapsed: false, autoSelect: false, engine: 'heuristic', left: null, top: null},
+        {collapsed: false, engine: 'heuristic', left: null, top: null, auto: true, delayMs: 700},
         store.get('ddz-copilot-config', {}),
     );
 
@@ -71,9 +72,13 @@
     let adviseInFlight = false;
     let adviseTimer = null;
     let lastError = '';
-    let serviceOk = null;        // null / true / false
+    let serviceOk = null;        // health 探活的结果：null 未知 / true / false。**只看它**
+    let requestFailures = 0;     // 连续失败的建议请求数（偶发一次不算服务挂了）
     let ingestedVersion = -1;
     let handEl = null;
+    let lastActedVersion = -1;   // 已经代为出手过的局面（防重复点击）
+    let continuedOnce = false;   // 续局只点一次
+    let pending = null;          // 待执行动作：{version, timer, label}
 
     // ---------------------------------------------------------------- fetch 拦截
 
@@ -113,6 +118,7 @@
         if (!state || typeof state.version !== 'number') return;
         if (state.unchanged) return;               // 只刷新计时，不影响建议
         if (state.version === lastVersion) return; // 同一份状态不重复处理
+        cancelPending();                           // 局面变了：上一个待执行动作作废
         if (state.version < lastVersion) {
             // version 只在一局之内递增；退回去说明换局了（整页跳转之外的情况也兜住）
             advice = null;
@@ -129,6 +135,7 @@
             }
             stopAdvising();
             render();
+            if (config.auto) scheduleContinue();
             return;
         }
         scheduleAdvise();
@@ -165,18 +172,23 @@
             .then((data) => {
                 adviseInFlight = false;
                 markServiceOk(true);
+                lastError = '';
                 if (!data) return;
                 if (latestState && latestState.version !== version) return; // 过期响应直接丢
                 advice = Object.assign({version}, data);
                 if (!data.ok) lastError = data.message || data.reason || '';
                 render();
-                if (config.autoSelect && data.ok && myTurn()) selectRecommended();
+                autoAct(data);
             })
             .catch((err) => {
                 adviseInFlight = false;
-                markServiceOk(false);
-                lastError = String(err && err.message ? err.message : err);
+                requestFailures += 1;
+                lastError = `建议请求失败（第 ${requestFailures} 次）：${String(err && err.message ? err.message : err)}`;
                 render();
+                // 浏览器复用已被服务端关掉的 keep-alive 连接时会偶发这种失败：
+                // 退避重试几次，别急着说"服务未启动"。
+                if (requestFailures <= 3) setTimeout(requestAdvise, 300 * requestFailures);
+                else probeHealth();
             });
     }
 
@@ -204,9 +216,17 @@
     }
 
     function markServiceOk(ok) {
+        if (ok) requestFailures = 0;
         if (serviceOk === ok) return;
         serviceOk = ok;
         render();
+    }
+
+    /** health 探活：它才是"服务在不在"的权威，单次 /advise 失败不作数。 */
+    function probeHealth() {
+        nativeFetch(API + '/health', {cache: 'no-store'})
+            .then((response) => markServiceOk(response.ok))
+            .catch(() => markServiceOk(false));
     }
 
     // ---------------------------------------------------------------- 面板
@@ -231,23 +251,26 @@
             body: shadow.querySelector('.body'),
             toggle: shadow.querySelector('.collapse'),
             selectBtn: shadow.querySelector('.select'),
-            autoBox: shadow.querySelector('.auto'),
+            masterBtn: shadow.querySelector('.auto-master'),
+            status: shadow.querySelector('.status'),
             engines: Array.from(shadow.querySelectorAll('.engine')),
             header: shadow.querySelector('.header'),
             footer: shadow.querySelector('.footer'),
         };
 
         if (config.collapsed) ui.panel.classList.add('collapsed');
-        ui.autoBox.checked = !!config.autoSelect;
+        ui.masterBtn.addEventListener('click', () => {
+            config.auto = !config.auto;
+            if (!config.auto) cancelPending();
+            store.set('ddz-copilot-config', config);
+            render();
+            if (config.auto) scheduleAdvise();   // 刚打开时可能已经轮到我了
+        });
         place();
 
         ui.toggle.addEventListener('click', () => {
             config.collapsed = !config.collapsed;
             ui.panel.classList.toggle('collapsed', config.collapsed);
-            store.set('ddz-copilot-config', config);
-        });
-        ui.autoBox.addEventListener('change', () => {
-            config.autoSelect = ui.autoBox.checked;
             store.set('ddz-copilot-config', config);
         });
         ui.selectBtn.addEventListener('click', () => { selectRecommended(); });
@@ -320,6 +343,8 @@
         if (serviceOk === false) {
             banner = '服务未启动：先跑 python -m ddz.service';
             kind = 'bad';
+        } else if (!state) {
+            banner = '等待牌局…';
         } else if (state) {
             if (state.phase === 'finished') {
                 banner = '本局已结束';
@@ -371,6 +396,29 @@
         }
         if (counterSource && counterSource.hand_analysis) {
             ui.body.append(handBlock(counterSource.hand_analysis));
+        }
+
+        // 总开关 + 状态行
+        ui.masterBtn.textContent = `自动打牌：${config.auto ? '开' : '关'}`;
+        ui.masterBtn.classList.toggle('on', !!config.auto);
+        if (!config.auto) {
+            ui.status.textContent = '纯建议模式（不代打）';
+            ui.status.className = 'status';
+        } else if (pending) {
+            ui.status.textContent = `⏳ ${pending.label}`;
+            ui.status.className = 'status';
+        } else if (lastError) {
+            ui.status.textContent = `⚠ ${lastError}`;
+            ui.status.className = 'status';
+        } else if (state && state.phase === 'finished') {
+            ui.status.textContent = continuedOnce ? '已点续局' : '准备续局…';
+            ui.status.className = 'status active';
+        } else if (!data && myTurn()) {
+            ui.status.textContent = '自动 · 正在算…';
+            ui.status.className = 'status active';
+        } else {
+            ui.status.textContent = '自动 · 叫分 / 出牌 / 续局';
+            ui.status.className = 'status active';
         }
 
         // 页脚
@@ -500,6 +548,173 @@
         return box;
     }
 
+    // ---------------------------------------------------------------- 自动执行
+
+    /*
+     * 代打的全部动作都在这里，规矩：
+     *   1. 只按自己的建议动手，建议必须属于**当前** version，过期就不动；
+     *   2. 出手前留一段可视延迟（默认 700ms），期间你关掉开关或在牌桌上点一下都能取消；
+     *   3. 选完牌先核对 DOM 里真的选中了建议的牌，对不上就放弃、绝不提交；
+     *   4. 局面一变（version 前进）立刻取消待执行动作。
+     */
+
+    /** 结算弹窗可能比状态晚一拍才渲染出来，所以续局要试几次。 */
+    function scheduleContinue(attempt = 0) {
+        if (!config.auto || continuedOnce || attempt > 8) return;
+        setTimeout(() => {
+            if (continuedOnce) return;
+            autoContinue();
+            if (!continuedOnce) scheduleContinue(attempt + 1);
+        }, attempt === 0 ? 1200 : 500);
+    }
+
+    function cancelPending() {
+        if (pending) {
+            clearTimeout(pending.timer);
+            pending = null;
+        }
+    }
+
+    /** 排一个待执行动作。``run()`` 返回 false 表示没做成（DOM 还没就绪之类），会重试几次。 */
+    function schedule(label, version, run, attempt = 0) {
+        if (attempt === 0) cancelPending();
+        pending = {version, label};
+        pending.timer = setTimeout(() => {
+            const action = pending;
+            pending = null;
+            if (!action) return;
+            if (!latestState || latestState.version !== action.version) return;  // 局面已经走了
+            let ok = false;
+            try {
+                ok = run() !== false;
+            } catch (err) {
+                lastError = String(err && err.message ? err.message : err);
+                render();
+            }
+            // 没做成多半是页面还没把按钮/手牌渲染出来——隔一会儿再试，直到局面变化
+            if (!ok && attempt < 6) schedule(label, version, run, attempt + 1);
+        }, attempt === 0 ? Math.max(0, config.delayMs || 0) : 250);
+        if (attempt === 0) render();
+    }
+
+    function actionButtons() {
+        const bar = document.getElementById('ddz-actions');
+        return bar ? Array.from(bar.querySelectorAll('button')) : [];
+    }
+
+    function visibleButton(predicate) {
+        return actionButtons().find((b) => {
+            if (b.disabled || b.hidden) return false;
+            const style = window.getComputedStyle(b);
+            if (style.display === 'none' || style.visibility === 'hidden') return false;
+            return predicate(b.textContent.trim());
+        }) || null;
+    }
+
+    function autoAct(data) {
+        if (!config.auto) return;
+        if (!data || !data.ok || !latestState) return;
+        if (latestState.version === lastActedVersion) return;   // 这个局面已经动过手
+        if (latestState.phase === 'finished') return;
+
+        if (data.bidding) {
+            const label = data.bidding.label;                   // 「不叫」或「N 分」
+            schedule(`自动叫分：${label}`, latestState.version, () => {
+                const button = visibleButton((text) => text === label);
+                if (!button) return;
+                lastActedVersion = latestState.version;
+                button.click();
+            });
+            return;
+        }
+
+        if (data.recommended) {
+            const description = data.recommended.description;
+            schedule(`自动出牌：${description}`, latestState.version, () => {
+                const played = executeRecommended(data.recommended);
+                if (played) lastActedVersion = latestState.version;
+            });
+        }
+    }
+
+    /** 按建议动手：不出就点「不出」，出牌就先选牌再核对，最后点「出牌」。 */
+    function executeRecommended(recommended) {
+        if (!latestState || latestState.phase !== 'playing' || !myTurn()) return false;
+
+        if (!recommended.cards || !recommended.cards.length) {
+            const passButton = visibleButton((text) => text.indexOf('不出') !== -1);
+            if (!passButton) return false;
+            passButton.click();
+            return true;
+        }
+
+        handEl = document.getElementById('ddz-hand');
+        const table = document.querySelector('.ddz-table');
+        if (!handEl || !table) return false;
+
+        table.dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, cancelable: true}));
+        for (const id of recommended.cards) {
+            const node = handEl.querySelector(`.ddz-card[data-card="${id}"]`);
+            if (!node) return false;                            // 手牌里没有这张，别瞎点
+            firePointer(node, 'pointerdown');
+            firePointer(node, 'pointerup');
+        }
+
+        // 核对：DOM 里真的选中了这些牌吗？
+        const selected = Array.from(handEl.querySelectorAll('.ddz-card.ddz-selected'))
+            .map((node) => Number(node.dataset.card)).sort((a, b) => a - b);
+        const wanted = recommended.cards.slice().sort((a, b) => a - b);
+        if (selected.join(',') !== wanted.join(',')) {
+            lastError = '选中的牌与建议不一致，放弃这一手';
+            render();
+            return false;
+        }
+
+        // 「出牌」按钮必须在**选完牌之后**重新查：它是 renderActions() 新建出来的，
+        // 选牌前那一份是 disabled 的（没选牌时页面本来就不让你出）。
+        const playButton = visibleButton((text) => text === '出牌');
+        if (!playButton) {
+            lastError = '没找到可用的「出牌」按钮';
+            render();
+            return false;
+        }
+
+        // 多种读法时，把「按哪种牌型打出」的下拉框拨到我们要的那种
+        const chooser = document.querySelector('#ddz-actions select.ddz-choice');
+        if (chooser && recommended.platform_key) {
+            const option = Array.from(chooser.options).find((o) => o.value === recommended.platform_key);
+            if (!option) {
+                lastError = '页面上没有建议的那种牌型读法，放弃这一手';
+                render();
+                return false;
+            }
+            chooser.value = option.value;
+            chooser.dispatchEvent(new Event('change', {bubbles: true}));
+        }
+
+        playButton.click();
+        return true;
+    }
+
+    /** 终局后自动进入下一局 / 下一场（按按钮文本找，和参考脚本同一套约定）。 */
+    function autoContinue() {
+        if (!config.auto || continuedOnce) return;
+        const isContinue = (text) =>
+            (text.indexOf('→') !== -1 || text.indexOf('再来一局') !== -1
+                || text.indexOf('再来一场比赛') !== -1) && text.indexOf('发送') === -1;
+        const boxes = [document.getElementById('ddz-result'), document.getElementById('ddz-actions')];
+        for (const box of boxes) {
+            if (!box) continue;
+            const button = Array.from(box.querySelectorAll('button'))
+                .find((b) => !b.disabled && isContinue(b.textContent.trim()));
+            if (button) {
+                continuedOnce = true;
+                button.click();
+                return;
+            }
+        }
+    }
+
     // ---------------------------------------------------------------- 帮我选中
 
     /*
@@ -561,10 +776,9 @@
         bootstrap();
         // 建议是"按需"的：轮到自己时页面本来就在 900ms 轮询，不需要自己再加定时器。
         // 只有服务掉线时才需要自己探活，好把"服务未启动"显示出来。
+        probeHealth();
         setInterval(() => {
-            if (!latestState || serviceOk === false) {
-                nativeFetch(API + '/health').then((r) => markServiceOk(r.ok)).catch(() => markServiceOk(false));
-            }
+            if (serviceOk !== true || !latestState) probeHealth();
         }, HEALTH_MS);
     }
 
@@ -638,6 +852,16 @@
             }
             .toolbar button[disabled] { background: rgba(255,255,255,.12); color: #9aa0a6; cursor: default; }
             .toolbar label { display: flex; align-items: center; gap: 4px; color: #9aa0a6; font-size: 11px; cursor: pointer; }
+            .toolbar.toggles { flex-wrap: wrap; gap: 8px; padding-top: 2px; }
+            .toolbar.toggles label { color: #cfd3d8; }
+            .toolbar.master { padding: 6px 10px 2px; }
+            .toolbar.master button {
+                flex: 1; text-align: center; font-size: 13px; padding: 6px 10px;
+                background: rgba(255,255,255,.12); color: #c8ccd1;
+            }
+            .toolbar.master button.on { background: #2f6feb; color: #fff; font-weight: 600; }
+            .status { padding: 3px 10px 0; font-size: 11px; color: #ffcc80; min-height: 14px; }
+            .status.active { color: #81c995; }
             .footer { padding: 5px 10px 7px; color: #8f9499; font-size: 11px; }
     `;
 
@@ -653,10 +877,13 @@
                 <button class="engine" data-engine="heuristic">启发式</button>
                 <button class="engine" data-engine="douzero">DouZero</button>
             </div>
+            <div class="toolbar master">
+                <button class="auto-master">自动打牌：开</button>
+            </div>
             <div class="toolbar">
                 <button class="select" disabled>帮我选中</button>
-                <label><input type="checkbox" class="auto"> 轮到我时自动选</label>
             </div>
+            <div class="status"></div>
             <div class="footer"></div>
         </div>
     `;

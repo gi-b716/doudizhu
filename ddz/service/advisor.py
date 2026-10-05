@@ -21,6 +21,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
@@ -40,6 +41,8 @@ from ..state import (
 )
 
 __all__ = ["AdviseOptions", "Advisor", "Session"]
+
+log = logging.getLogger("ddz.advisor")
 
 #: 每个会话最多缓存多少条建议（按 version 从旧到新淘汰）。
 _CACHE_LIMIT = 64
@@ -201,6 +204,8 @@ class Advisor:
         try:
             state = from_platform_state(payload, prev=session.state)
         except StateParseError as exc:
+            # 解析不了要留痕：否则日志里只有一行 200，根本看不出哪里不对
+            log.warning("session=%s 解析失败：%s", session_key, exc)
             return {
                 "ok": False,
                 "reason": "parse_error",
@@ -329,6 +334,7 @@ class Advisor:
                 seat_of_interest=seat_of_interest,
             )
         except StateParseError as exc:
+            log.warning("归档被拒：%s", exc)
             return {"ok": False, "reason": "parse_error", "message": str(exc)}
 
         try:
@@ -398,6 +404,9 @@ class Advisor:
         return {
             "cards": list(candidate.cards),
             "pattern_key": candidate.pattern_key,
+            # 平台 DoudizhuRules.patternKey 的格式——代打时要用它拨「按哪种牌型打出」的下拉框，
+            # 提交给服务器的 choice 就是它（我们自己的 key 类型名和点数约定都不同）
+            "platform_key": candidate.move.pattern.platform_key() if candidate.move else None,
             "description": describe_move(candidate.move),
             "score": None if candidate.score == float("inf") else round(candidate.score, 3),
             "win_prob": candidate.win_prob,

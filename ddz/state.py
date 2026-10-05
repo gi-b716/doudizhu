@@ -12,11 +12,12 @@
 - **version 跳跃**：不做任何增量假设，每份 state 都整体重建；``prev`` 只用于
   ``unchanged``。
 
-**平台 pattern 对象的形状不可知**（``window.DoudizhuRules`` 没有副本）：所以牌型一律
-从 ``cards`` 用我们自己的规则引擎反推，平台的 pattern 只当作提示——能认出来且与牌面
-自洽就用它，否则用 :func:`ddz.patterns.classify` 优先级最高的读法（:attr:`TableEntry.
-pattern_source` 记录来源）。真正无法解释的 state（例如平台出了一手我们的规则认不出的
-牌）抛 :class:`StateParseError`，由服务转成降级响应，绝不崩溃。
+**平台 pattern 的形状**（``src/doudizhu-rules.js`` 到手后已确认）：``{type, rank, len}``，
+类型名是 ``trio1``/``plane1``/``four2`` 那套，链条的 ``rank`` 记的是**最高**点数——
+:meth:`ddz.patterns.Pattern.from_platform` 能精确解析它。所以现在优先采信平台的 pattern，
+认不出或与牌面矛盾时才退到 :func:`ddz.patterns.classify` 的优先读法（:attr:`TableEntry.
+pattern_source` 记录来源）。真正无法解释的 state（例如出了我们的规则认不出的牌）抛
+:class:`StateParseError`，由服务转成降级响应，绝不崩溃。
 """
 
 from __future__ import annotations
@@ -444,12 +445,17 @@ _LEN_KEYS = ("length", "len", "count", "n", "l", "size")
 def parse_platform_pattern(raw: Any) -> Pattern | None:
     """尽力把平台的 pattern 对象读成 :class:`Pattern`；读不出返回 ``None``。
 
-    只认两种形状：形如 ``'triple:9:1'`` 的字符串，或带 ``type``/``rank``/``len`` 这类
-    常见字段名的对象。**不做任何猜测性修正**——读错了会在
-    :func:`resolve_pattern` 里与牌面对照时被丢掉。
+    首选**精确**解析：``src/doudizhu-rules.js`` 里的形状是 ``{type, rank, len}``，类型名是
+    ``trio1``/``plane1``/``four2`` 这一套，链条的 ``rank`` 记的是最高点数
+    （见 :meth:`ddz.patterns.Pattern.from_platform`）。另外兼容形如 ``'triple:9:1'`` 的
+    字符串与常见字段名，纯属兜底。**不做猜测性修正**——读错了会在 :func:`resolve_pattern`
+    里与牌面对照时被丢掉。
     """
     if raw is None:
         return None
+    exact = Pattern.from_platform(raw)
+    if exact is not None:
+        return exact
     if isinstance(raw, str):
         try:
             return Pattern.parse_key(raw.strip())

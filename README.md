@@ -1,7 +1,7 @@
 # 斗地主 Copilot
 
-在真实对局中**实时给出可解释的出牌建议**——只建议，不代打、不自动提交。内置无界面模拟器与
-自对弈竞技场用于验证策略强度。
+在真实对局中**实时给出可解释的出牌建议**，也可以**代打**（自动叫分 / 自动出牌 / 自动续局，
+三个开关默认开，一键可暂停）。内置无界面模拟器与自对弈竞技场用于验证策略强度。
 
 实施计划见 [`PLAN.md`](PLAN.md)。`src/` 下的平台客户端与规则文档是只读参照，也是语义金标准。
 
@@ -12,7 +12,7 @@
 | 0 | 脚手架 + 规则引擎（`cards` / `patterns` / `moves`）+ rules 语料 | ✅ |
 | 1 | `state` / `record` / `counter` / `archive` + `/ingest` + `verify_fairness` | ✅ |
 | 2 | 拆解器 + 启发式 + 叫分 + 模拟器/竞技场 | ✅ |
-| 3 | 本地服务 + 油猴浮窗（仅启发式）→ 第一个可用版本 | ✅ |
+| 3 | 本地服务 + 油猴浮窗（启发式）+ **自动代打** | ✅ |
 | 4 | DouZero vendoring / bridge / agent / bench | 待做 |
 | 5 | 残局求解器 + 威胁提示 + 理由润色 | 待做 |
 
@@ -45,9 +45,12 @@ uv run python -m ddz.arena.match --players douzero:WP,heuristic,heuristic --game
 4. 浮窗工具栏上有两个引擎可选：**启发式**（现在就可用）和 **DouZero**（Phase 4 权重就位后可用）。
    选中 DouZero 但环境没装好时，面板会说明原因并提示切回启发式，而不是静默失败。
    服务端的 `auto` 会在 DouZero 注册后自动切过去，不需要改脚本。
-5. 「帮我选中」是**显式 opt-in**：点一下才会替你在手牌上做选择（也可以勾上「轮到我时自动选」）。
-   它绝不点「出牌」、绝不对游戏接口发任何请求——出不出牌永远是你自己的事。
-6. 一局结束后自动归档到 `data/games.jsonl`（同一局重复抓到只留一行）。
+5. **代打**由一个总开关管（面板上「自动打牌：开/关」，默认开，管叫分、出牌、续局）。
+   四条护栏：只按页面自己的按钮（绝不自己构造请求打给游戏接口）、出手前留约 0.7 秒可视延迟
+   且局面一变就作废、选完牌要核对 DOM 里真的选中了建议的牌（对不上就放弃）、同一局面只动一次手。
+   动作没做成（按钮/手牌还没渲染出来）会自动重试，并把原因显示在状态行上。
+6. 「帮我选中」是手动版：点一下才替你在手牌上做选择。
+7. 一局结束后自动归档到 `data/games.jsonl`（同一局重复抓到只留一行）。
 
 ### 已知战绩（seed 7，200 局，座位轮换）
 
@@ -60,6 +63,11 @@ uv run python -m ddz.arena.match --players douzero:WP,heuristic,heuristic --game
 系数 2，已确认按 rules.md；实现只有 `ddz/arena/simulator.py:score_deltas` 一处）。
 
 启发式权重在 `ddz.engine.heuristic.Weights`（默认值取自 PLAN §3.3）。
+
+**规则引擎已被平台自己的引擎验证过**：`src/doudizhu-rules.js`（平台 `UOJDoudizhuRules.php`
+的镜像，服务器说了算）到手后，`tests/test_platform_parity.py` 在 node 里跑它，与我们的引擎比对
+**全部读法（含顺序）、14×14 种两两压牌、patternKey 逐字**。自动出牌提交的 `choice` 就是
+`Pattern.platform_key()`（平台格式是 `类型:最大点数:长度`，类型名是 `trio1`/`plane1` 那套）。
 
 两条纪律（都是踩过坑之后加的）：
 

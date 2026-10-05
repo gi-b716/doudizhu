@@ -44,7 +44,7 @@ def test_advise_response_matches_the_planned_shape(client):
                   "hand_analysis", "bidding", "timing_ms", "engine"):
         assert field in body, field
     rec = body["recommended"]
-    assert set(rec) >= {"cards", "pattern_key", "description", "score", "source", "rationale"}
+    assert set(rec) >= {"cards", "pattern_key", "platform_key", "description", "score", "source", "rationale"}
     assert set(body["timing_ms"]) >= {"total", "parse"}
     assert set(body["engine"]) >= {"name", "fallback"}
 
@@ -52,6 +52,34 @@ def test_advise_response_matches_the_planned_shape(client):
 def test_advise_accepts_the_state_wrapper(client):
     body = client.post("/advise", json={"session": "t1", "state": {"state": my_turn()}}).json()
     assert body["ok"] is True
+
+
+def test_recommendation_carries_the_platform_key(client):
+    """代打要用平台自己的 key 提交 choice，这里保证响应里带着它、格式对得上。"""
+    from ddz import patterns as P
+
+    cards = None
+    for seed in (0, 3, 7):
+        state = next(s for s in states(seed) if s["phase"] == "playing" and s["turn"] == s["seat"])
+        body = client.post("/advise", json={"session": f"k{seed}", "state": state}).json()
+        if body["ok"] and body["recommended"]["cards"]:
+            cards = body["recommended"]
+            break
+    assert cards, "没找到有出牌建议的局面"
+    pattern = P.Pattern.parse_key(cards["pattern_key"])
+    assert cards["platform_key"] == pattern.platform_key()
+    assert cards["platform_key"].split(":")[0] in set(P.PLATFORM_TYPES.values())
+
+
+def test_pass_recommendation_has_no_platform_key(client):
+    """「不出」没有牌型，platform_key 必须是 null（前端据此走点「不出」那条路）。"""
+    for seed in range(8):
+        state = next(s for s in states(seed) if s["phase"] == "playing" and s["turn"] == s["seat"])
+        body = client.post("/advise", json={"session": f"p{seed}", "state": state}).json()
+        if body["ok"] and body["recommended"] and not body["recommended"]["cards"]:
+            assert body["recommended"]["platform_key"] is None
+            return
+    pytest.skip("这批种子里没有出现「不出」的建议")
 
 
 def test_advise_accepts_game_id(client):
@@ -149,13 +177,86 @@ def test_userscript_offers_two_engines():
     assert "engineSpec" in source
 
 
-def test_userscript_never_submits_moves():
-    """安全姿态：只读建议，绝不向游戏接口发任何东西，也不改轮询频率（PLAN §6.5）。"""
+def test_userscript_only_acts_through_the_page_buttons():
+    """代打只按**页面自己的按钮**：不自己构造请求打给游戏接口，也就不改协议、不加频率。
+
+    （"不代打"曾经是设计前提，用户明确要求改成自动打牌；这条守住的是剩下的部分：
+    我们只驱动页面已有的按钮，绝不绕过它自己发 play/pass/bid。）
+    """
     source = USERSCRIPT.read_text(encoding="utf-8")
-    # 平台的写操作全走 URLSearchParams{action: play|pass|bid|auto}，脚本里不该有这些
+    # 平台的写操作全走 URLSearchParams{action: play|pass|bid|auto}——脚本里不该有
     assert "URLSearchParams" not in source
     assert "action=" not in source
     # 轮询频率是页面自己的事，脚本不许插手
     assert "poll" not in source.replace("polling", "")
-    # 所有出站请求都打本地服务（health 探测走原生 fetch，其它走 API 前缀）
-    assert "fetch(API + path" in source and "nativeFetch(API + '/health')" in source
+    # 游戏接口只出现在 fetch 拦截里（只读旁路），有且仅有一次
+    assert source.count("/games/doudizhu/api") == 1
+    # 出站请求只打本地服务
+    assert "fetch(API + path" in source and "nativeFetch(API + '/health'" in source
+
+
+def test_userscript_looks_up_the_play_button_after_selecting():
+    """回归：页面的「出牌」按钮在**没选牌时是 disabled 的**（``!sel.options.length``），
+    所以必须先选牌、核对，再去查按钮；在选牌前查会永远查不到 → 自动出牌静默失效。"""
+    source = USERSCRIPT.read_text(encoding="utf-8")
+    body = source.split("function executeRecommended")[1].split("function autoContinue")[0]
+    select_at = body.index("pointerdown")
+    verify_at = body.index("ddz-selected")
+    play_at = body.index("text === '出牌'")
+    assert select_at < play_at, "先选牌再查「出牌」按钮"
+    assert verify_at < play_at, "先核对选中再查按钮"
+
+
+def test_userscript_separates_service_down_from_a_failed_request():
+    """偶发一次请求失败 ≠ 服务没起来：只有 health 探不通才显示「服务未启动」。
+
+    （浏览器复用已被服务端关掉的 keep-alive 连接时，POST 会偶发 Failed to fetch，
+    GET 会被浏览器自动重试而 POST 不会——所以这两种情况必须分开报。）
+    """
+    source = USERSCRIPT.read_text(encoding="utf-8")
+    assert "function probeHealth()" in source
+    assert "serviceOk = ok" in source                      # 只有探活能改这个状态
+    assert "requestFailures <= 3" in source                # 失败退避重试
+    assert "setTimeout(requestAdvise, 300 * requestFailures)" in source
+    # 请求失败不再直接判服务死刑：catch 块里不该出现 markServiceOk(false)
+    catch_block = source.split(".catch((err) => {")[-1].split("});")[0]
+    assert "markServiceOk(false)" not in catch_block
+    assert "probeHealth()" in catch_block      # 连续失败才去探活确认
+
+
+def test_server_keeps_connections_alive_long_enough():
+    """服务端 keep-alive 不能太短，否则浏览器会复用到刚被关掉的连接。"""
+    from ddz.service.__main__ import main  # noqa: F401
+    import inspect
+
+    source = inspect.getsource(__import__("ddz.service.__main__", fromlist=["main"]))
+    assert "timeout_keep_alive" in source
+    assert "--keep-alive" in source
+
+
+def test_userscript_retries_until_the_dom_is_ready():
+    """动作没做成（按钮还没渲染出来之类）要重试，不能静默什么都不做。"""
+    source = USERSCRIPT.read_text(encoding="utf-8")
+    assert "attempt < 6" in source
+    assert "if (!ok && attempt" in source
+
+
+def test_userscript_has_one_master_switch():
+    """一个总开关管叫分/出牌/续局，不再分成三个。"""
+    source = USERSCRIPT.read_text(encoding="utf-8")
+    assert "auto-master" in source
+    assert "自动打牌：" in source
+    for gone in ("auto-bid", "auto-play", "auto-continue", "autoBid", "autoPlay"):
+        assert gone not in source, f"应该已经合并成总开关了：{gone}"
+    assert "if (!config.auto) return;" in source  # 所有自动动作的总闸
+
+
+def test_userscript_automation_has_guards():
+    """代打的四条护栏必须在：按 version 过期、可取消、提交前核对选中、只按一次。"""
+    source = USERSCRIPT.read_text(encoding="utf-8")
+    assert "lastActedVersion" in source          # 同一局面只动一次手
+    assert "cancelPending" in source             # 局面一变就作废待执行动作
+    assert "ddz-selected" in source              # 选完牌核对 DOM
+    assert "放弃这一手" in source                 # 核对不过就放弃，不瞎点
+    assert "continuedOnce" in source             # 续局只点一次
+    assert "platform_key" in source              # 多种读法时按平台 key 拨下拉框
