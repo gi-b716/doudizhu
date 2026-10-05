@@ -57,8 +57,9 @@
         }
     })();
 
+    // engine: 'heuristic' | 'douzero'（两个引擎选项；douzero 要等 Phase 4 权重就位）
     const config = Object.assign(
-        {collapsed: false, autoSelect: false, left: null, top: null},
+        {collapsed: false, autoSelect: false, engine: 'heuristic', left: null, top: null},
         store.get('ddz-copilot-config', {}),
     );
 
@@ -112,6 +113,12 @@
         if (!state || typeof state.version !== 'number') return;
         if (state.unchanged) return;               // 只刷新计时，不影响建议
         if (state.version === lastVersion) return; // 同一份状态不重复处理
+        if (state.version < lastVersion) {
+            // version 只在一局之内递增；退回去说明换局了（整页跳转之外的情况也兜住）
+            advice = null;
+            ingestedVersion = -1;
+            lastError = '';
+        }
         lastVersion = state.version;
         latestState = state;
 
@@ -149,7 +156,12 @@
         if (adviseInFlight || !latestState) return;
         const version = latestState.version;
         adviseInFlight = true;
-        post('/advise', {session, state: latestState, options: {agent: 'auto'}})
+        post('/advise', {
+            session,
+            game_id: currentGameId(),
+            state: latestState,
+            options: {agent: engineSpec()},
+        })
             .then((data) => {
                 adviseInFlight = false;
                 markServiceOk(true);
@@ -172,6 +184,10 @@
         post('/ingest', {state, game_id: currentGameId()})
             .then(() => markServiceOk(true))
             .catch(() => markServiceOk(false));
+    }
+
+    function engineSpec() {
+        return config.engine === 'douzero' ? 'douzero:WP' : 'heuristic';
     }
 
     function currentGameId() {
@@ -216,6 +232,7 @@
             toggle: shadow.querySelector('.collapse'),
             selectBtn: shadow.querySelector('.select'),
             autoBox: shadow.querySelector('.auto'),
+            engines: Array.from(shadow.querySelectorAll('.engine')),
             header: shadow.querySelector('.header'),
             footer: shadow.querySelector('.footer'),
         };
@@ -234,8 +251,26 @@
             store.set('ddz-copilot-config', config);
         });
         ui.selectBtn.addEventListener('click', () => { selectRecommended(); });
+        ui.engines.forEach((button) => button.addEventListener('click', () => {
+            const wanted = button.dataset.engine;
+            if (config.engine === wanted) return;
+            config.engine = wanted;
+            store.set('ddz-copilot-config', config);
+            advice = null;                 // 换引擎就重新问，别拿旧引擎的结论糊弄
+            lastError = '';
+            syncEngineButtons();
+            scheduleAdvise();
+            render();
+        }));
+        syncEngineButtons();
         makeDraggable();
         render();
+    }
+
+    function syncEngineButtons() {
+        ui.engines.forEach((button) => {
+            button.classList.toggle('active', button.dataset.engine === config.engine);
+        });
     }
 
     function place() {
@@ -316,6 +351,10 @@
                     ui.body.append(alternativesBlock(data.alternatives));
                 }
             }
+        } else if (data && data.reason === 'no_engine') {
+            const note = el('div', 'note', data.message || 'DouZero 未就绪');
+            note.append(el('div', 'note', '点上面的「启发式」就能继续用。'));
+            ui.body.append(note);
         } else if (data && data.reason && data.reason !== 'not_my_turn') {
             ui.body.append(el('div', 'note', data.message || data.reason));
         } else if (!data && myTurn() && serviceOk !== false) {
@@ -589,6 +628,14 @@
                 all: unset; cursor: pointer; padding: 3px 10px; border-radius: 5px;
                 background: #2f6feb; color: #fff; font-size: 12px;
             }
+            .toolbar.engines { gap: 4px; padding-bottom: 2px; }
+            .toolbar.engines button {
+                flex: 1; text-align: center; background: rgba(255,255,255,.08);
+                color: #c8ccd1; border: 1px solid transparent;
+            }
+            .toolbar.engines button.active {
+                background: rgba(47,111,235,.28); color: #fff; border-color: #2f6feb;
+            }
             .toolbar button[disabled] { background: rgba(255,255,255,.12); color: #9aa0a6; cursor: default; }
             .toolbar label { display: flex; align-items: center; gap: 4px; color: #9aa0a6; font-size: 11px; cursor: pointer; }
             .footer { padding: 5px 10px 7px; color: #8f9499; font-size: 11px; }
@@ -602,6 +649,10 @@
             </div>
             <div class="banner"></div>
             <div class="body"></div>
+            <div class="toolbar engines">
+                <button class="engine" data-engine="heuristic">启发式</button>
+                <button class="engine" data-engine="douzero">DouZero</button>
+            </div>
             <div class="toolbar">
                 <button class="select" disabled>帮我选中</button>
                 <label><input type="checkbox" class="auto"> 轮到我时自动选</label>

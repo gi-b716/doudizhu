@@ -528,12 +528,14 @@ def control_ranks(
     bombs: Sequence[int] = (),
     rockets: int = 0,
 ) -> tuple[int, ...]:
-    """控制牌：两张王、2、以及留着当炸弹的四张同点。
+    """控制牌：两张王、2、以及手里攥着的四张同点。
 
-    这些是"能重新拿回出牌权"的牌，剩下的手数才是真正的负担。
+    这些是"能重新拿回出牌权"的牌，剩下的手数才是真正的负担。四张同点**默认**算控制牌
+    （手里有炸弹就是有控制，不用等拆解结果）；``bombs`` 是拆解额外认定的炸弹点数。
     """
     counts = C.rank_counts(hand)
     control = {r for r in (C.JOKER_RANK, C.JOKER_RANK + 1, 12) if counts[r]}
+    control.update(r for r in range(C.JOKER_RANK) if counts[r] == 4)
     control.update(bombs)
     if rockets:  # 王炸整体算一张控制牌，点数记在大王上
         control.discard(C.JOKER_RANK)

@@ -78,7 +78,7 @@ def create_app(archive: Archive | None = None, advisor: Advisor | None = None) -
             deadline_ms=request.options.deadline_ms,
             for_seat=request.options.for_seat,
         )
-        return advisor.advise(request.session, request.state, options)
+        return advisor.advise(request.session, request.state, options, game_id=request.game_id)
 
     @app.post("/ingest", response_model=IngestResponse)
     def ingest(request: IngestRequest) -> dict[str, Any]:

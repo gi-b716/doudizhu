@@ -67,6 +67,8 @@ class AdviseRequest(BaseModel):
 
     session: str = "default"
     state: dict[str, Any]
+    #: 页面 ``#ddz`` 的 ``data-game``。换局时 version 会从 0 重来，靠它区分两局。
+    game_id: str | None = None
     options: AdviseOptionsModel = Field(default_factory=AdviseOptionsModel)
 
 

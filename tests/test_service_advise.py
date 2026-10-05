@@ -54,6 +54,23 @@ def test_advise_accepts_the_state_wrapper(client):
     assert body["ok"] is True
 
 
+def test_advise_accepts_game_id(client):
+    """换局靠 game_id 区分：同一个 session 连着问两局，不能串。"""
+    def index(seed):
+        return {
+            s["version"]: s
+            for s in states(seed)
+            if s["turn"] == s["seat"] and s["phase"] in ("bidding", "playing")
+        }
+
+    left, right = index(0), index(2)  # 这两局有大量重合的 version
+    version = min(set(left) & set(right))  # 同一个 version 号，两局完全不同
+    a = client.post("/advise", json={"session": "tab", "state": left[version], "game_id": "g1"}).json()
+    b = client.post("/advise", json={"session": "tab", "state": right[version], "game_id": "g2"}).json()
+    assert a["version"] == b["version"]
+    assert a["hand"] != b["hand"], "换局后不能还拿上一局的手牌"
+
+
 def test_advise_defaults_are_enough(client):
     """脚本可以只传 session + state，options 全默认。"""
     body = client.post("/advise", json={"session": "t1", "state": my_turn()}).json()
@@ -121,6 +138,15 @@ def test_userscript_is_valid_javascript():
         pytest.skip("没有 node，跳过语法检查")
     result = subprocess.run([node, "--check", str(USERSCRIPT)], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+
+
+def test_userscript_offers_two_engines():
+    """浮窗要能选「启发式 / DouZero」两个引擎。"""
+    source = USERSCRIPT.read_text(encoding="utf-8")
+    assert 'data-engine="heuristic"' in source and 'data-engine="douzero"' in source
+    assert "douzero:WP" in source
+    assert "options: {agent: engineSpec()}" in source
+    assert "engineSpec" in source
 
 
 def test_userscript_never_submits_moves():

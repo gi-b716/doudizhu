@@ -75,29 +75,62 @@ def test_must_block_when_partner_is_not_the_last_player(agent):
 # --------------------------------------------------------------------- 硬规则 4
 
 
-def test_hard_rule_let_the_partner_lead(agent):
-    state = game_state("2 2 3 4 5", to_beat=reading("5"), last_seat=2, counts=[5, 9, 6])
+def test_partner_lead_defaults_to_letting_them_play(agent):
+    """队友领出，而我只能拆结构或动控制牌 → 不出。"""
+    state = game_state("2 2 3 3", to_beat=reading("5"), last_seat=2, counts=[4, 9, 8])
     candidate = agent.act(state)
     assert candidate.is_pass
-    assert "hard:partner_lead" in candidate.tags
     assert "上家是队友" in candidate.reasons[0]
 
 
+def test_partner_lead_dumps_junk_when_it_is_free(agent):
+    """队友领小牌、我手里有张孤零零的废牌 → 顺手放掉，不再一律不出。"""
+    state = game_state("6 8 8 9 9 10 J Q K A", to_beat=reading("3"), last_seat=2, counts=[10, 9, 8])
+    candidate = agent.act(state)
+    assert not candidate.is_pass
+    assert "hard:partner_dump" in candidate.tags
+    assert candidate.pattern_key == "single:3:1"  # ♠6
+    assert "顺手" in candidate.reasons[0]
+
+
+def test_no_dump_while_the_partner_is_closing_in(agent):
+    """队友只剩 4 张、马上要走完 → 还是让他走，别抢。"""
+    state = game_state("6 8 8 9 9 10 J Q K A", to_beat=reading("3"), last_seat=2, counts=[10, 9, 4])
+    assert agent.act(state).is_pass
+
+
+def test_beating_the_partner_pays_a_price(agent):
+    """没有便宜可占时，压队友的候选都带着"抢出牌权"的扣分项。"""
+    from ddz.moves import legal_beats
+
+    hand = "3 5 7 9 J K 2 4 6 8 10 Q A"
+    state = game_state(hand, to_beat=reading("9"), last_seat=2, counts=[13, 9, 4])
+    scored = [
+        agent._score(state, 0, tuple(state.hand), m, 2, [1], [], agent.weights.coop)
+        for m in legal_beats(state.hand, state.to_beat)
+    ]
+    assert scored and all(any("抢掉队友" in reason for reason in item[2]) for item in scored)
+
+
 def test_hard_rule_never_overtake_a_partner_with_two_cards(agent):
+    """队友只剩 2 张：这是唯一的铁律——绝不压。"""
     state = game_state("2 2 3 4 5", to_beat=reading("3"), last_seat=2, counts=[5, 9, 2])
     candidate = agent.act(state)
     assert candidate.is_pass and "hard:partner_low" in candidate.tags
 
+    state = game_state("3 4 5 6 7 8 9", to_beat=reading("3"), last_seat=2, counts=[7, 9, 1])
+    assert agent.act(state).is_pass
 
-def test_hard_rule_take_over_when_partner_is_far_and_we_are_close(agent):
-    """队友还有 8 张、我两手持完 → 不再"放行"，改为正常打分（可能压，也可能仍然不出）。"""
-    close = game_state("34567 88", to_beat=reading("3"), last_seat=2, counts=[7, 9, 8])
-    candidate = agent.act(close)
-    assert "hard:partner_lead" not in candidate.tags, "该接管时不该直接放行"
 
-    # 对照组：队友只剩 6 张（没到" > 6 张"的门槛）→ 照常放行
-    not_so_close = game_state("34567 88", to_beat=reading("3"), last_seat=2, counts=[7, 9, 6])
-    assert "hard:partner_lead" in agent.act(not_so_close).tags
+def test_take_over_when_i_am_close_to_finishing(agent):
+    """队友只剩 4 张（快走完了），但我三手内就能走完 → 照样把废牌放掉抢牌权。"""
+    near = game_state("6 88 99", to_beat=reading("3"), last_seat=2, counts=[5, 9, 4])
+    candidate = agent.act(near)
+    assert not candidate.is_pass and "hard:partner_dump" in candidate.tags
+
+    # 对照组：我手上还有一堆结构（5 手）→ 让队友走
+    far = game_state("6 7 88 99 10 J", to_beat=reading("3"), last_seat=2, counts=[7, 9, 4])
+    assert agent.act(far).is_pass
 
 
 # --------------------------------------------------------------------- 硬规则 5
@@ -121,11 +154,19 @@ def test_finishing_with_a_bomb_is_always_right(agent):
 
 
 def test_never_bomb_a_partner(agent):
-    """手里还有别的牌，只能靠炸弹管上队友 → 不出。"""
-    state = game_state("3333 7", to_beat=reading("5"), last_seat=2, counts=[5, 9, 6])
+    """只有炸弹能管上队友 → 不出（炸弹绝不用来压自己人）。"""
+    state = game_state("3333 7", to_beat=reading("9"), last_seat=2, counts=[5, 9, 6])
     candidate = agent.act(state)
     assert candidate.is_pass
-    assert "hard:partner_lead" in candidate.tags
+
+
+def test_dumping_over_the_partner_is_never_a_bomb(agent):
+    """顺手放废牌可以，但绝不是把炸弹甩出去。"""
+    state = game_state("3333 7", to_beat=reading("5"), last_seat=2, counts=[5, 9, 6])
+    candidate = agent.act(state)
+    assert not candidate.is_pass
+    assert not P.is_bomb(candidate.move.pattern)
+    assert candidate.pattern_key == "single:4:1"  # 只可能是那张 7
 
 
 def test_bomb_allowed_to_stop_an_opponent_at_one_card(agent):
@@ -238,3 +279,57 @@ def test_decisions_are_always_legal(agent):
         assert set(candidate.cards) <= set(hand)
         assert candidate.pattern_key in {p.key() for p in P.classify(candidate.cards)}
         assert P.beats(candidate.move.pattern, to_beat)
+
+
+# --------------------------------------------------------------------- 带队友走（喂牌）
+
+
+def test_feed_the_partner_with_the_lowest_single(agent):
+    """队友只剩 2 张、轮到我领出 → 出手里最小的单张喂他（"带队友走"）。"""
+    state = game_state("6 88 99 10 J Q K A", counts=[10, 2, 9], landlord=2)  # 队友是下家
+    candidate = agent.act(state)
+    assert not candidate.is_pass
+    assert candidate.pattern_key == "single:3:1"          # ♠6：手里最小的单张
+    assert "scored:feed" in candidate.tags
+    assert any("喂他" in reason for reason in candidate.reasons)
+
+
+def test_feed_is_discounted_when_the_landlord_sits_between(agent):
+    """队友是上家时地主夹在中间，喂牌权重减半，理由里也写明白。"""
+    state = game_state("6 88 99 10 J Q K A", counts=[10, 9, 2], landlord=1)
+    candidate = agent.act(state)
+    assert "scored:feed" in candidate.tags
+    assert any("未必接得上" in reason for reason in candidate.reasons)
+
+
+def test_take_the_lead_back_when_the_partner_is_about_to_finish(agent):
+    """队友 2 张、地主刚出牌 → 接过来拿回牌权，别让地主一直领。"""
+    state = game_state("6 88 99 10 J Q K A", to_beat=reading("5"), last_seat=1, counts=[10, 9, 2], landlord=1)
+    candidate = agent.act(state)
+    assert not candidate.is_pass
+    assert "scored:coop" in candidate.tags
+
+
+def test_feed_does_not_apply_without_a_single(agent):
+    """手里全是对子：喂不了单张，就按常规出最小的对子。"""
+    state = game_state("2 2 A A K K", counts=[6, 2, 9], landlord=2)
+    candidate = agent.act(state)
+    assert not candidate.is_pass
+    assert candidate.move.pattern.type == P.PAIR
+    assert "scored:feed" not in candidate.tags
+
+
+def test_every_recommendation_carries_a_reason(agent):
+    """任何推荐都得带理由——界面上不能出现"有建议但没说法"。"""
+    import random
+
+    from helpers import random_hand
+
+    rng = random.Random(11)
+    for _ in range(40):
+        hand = random_hand(rng, rng.randint(5, 17), max_count=4)
+        state = game_state(hand, counts=[len(hand), rng.randint(1, 9), rng.randint(1, 9)],
+                           landlord=rng.choice([1, 2]))
+        candidate = agent.act(state)
+        assert candidate.reasons, f"没有理由：{hand}"
+        assert all(isinstance(text, str) and text for text in candidate.reasons)

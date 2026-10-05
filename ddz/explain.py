@@ -174,8 +174,14 @@ def reason_block(label: str, count: int) -> str:
     return f"压住只剩 {count} 张的{label}"
 
 
-def reason_feed(count: int) -> str:
-    return f"队友只剩 {count} 张，出张小牌喂他"
+def reason_feed(count: int, reliable: bool = True) -> str:
+    if reliable:
+        return f"队友只剩 {count} 张，出张小牌喂他"
+    return f"队友只剩 {count} 张，出张小牌喂他（地主夹在中间，未必接得上）"
+
+
+def reason_quiet() -> str:
+    return "这一手不拆结构、不动大牌，按拆解走最省"
 
 
 def reason_team(label: str) -> str:
@@ -196,6 +202,14 @@ def reason_partner_lead(label: str) -> str:
 
 def reason_partner_low(count: int) -> str:
     return f"队友只剩 {count} 张，绝不能压他"
+
+
+def reason_partner_dump(card: str, label: str) -> str:
+    return f"{label}领的是小牌，顺手把 {card} 放掉，牌权还在自家"
+
+
+def reason_grabbing_partner() -> str:
+    return "这一手会抢掉队友的出牌权"
 
 
 def reason_take_over(count: int) -> str:

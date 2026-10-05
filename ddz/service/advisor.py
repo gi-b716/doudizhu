@@ -4,6 +4,10 @@
 
 - **会话**：按 ``session`` 记住上一份 :class:`~ddz.state.GameState`。``unchanged`` 只刷新计时，
   不重建（客户端 ``accept()`` 同口径）；version 跳跃不做增量假设。
+- **换局即重置**：``version`` 只在**一局之内**单调递增，换一局会从 0 重新开始（客户端自己也是
+  这么用的）。所以缓存键必须带上局标识，否则第二把的 v5 会命中第一把 v5 的建议——整个面板
+  都会显示上一局的牌。局标识优先用页面给的 ``game_id``（``#ddz`` 的 ``data-game``），
+  拿不到就靠 **version 回退** 来判定换局。
 - **永远给得出的东西**：记牌器、威胁、手牌分析在任何回合都给——这样"没轮到我"时界面也有内容，
   而不是一片空白。
 - **建议缓存**：键 ``(version, seat, agent)``。同一个局面被反复问（浮窗重绘、多开标签页）只算一次。
@@ -69,9 +73,26 @@ class Session:
     """一个浮窗（或一个标签页）的会话状态。"""
 
     key: str
+    game_id: str | None = None
     state: GameState | None = None
     cache: dict[tuple[int, int, str], dict] = field(default_factory=dict)
     seen_at: float = 0.0
+
+    def reset(self, game_id: str | None = None) -> None:
+        """换局：丢掉上一局的局面与**全部**缓存（version 跨局会重来，缓存必须一起清）。"""
+        self.game_id = game_id
+        self.state = None
+        self.cache.clear()
+
+    def is_new_game(self, game_id: str | None, version: int) -> bool:
+        """这一份 state 是不是新的一局？
+
+        两个判据：页面明确报了不同的 ``game_id``；或者 ``version`` 退回去了
+        （version 只在一局之内单调递增，退回去只能是换局）。
+        """
+        if game_id is not None and game_id != self.game_id:
+            return True
+        return self.state is not None and version < self.state.version
 
     def remember(self, key: tuple[int, int, str], value: dict) -> None:
         self.cache[key] = value
@@ -88,6 +109,7 @@ class Advisor:
         *,
         archive: Archive | None = None,
         default_agent: str = "auto",
+        auto_preference: tuple[str, ...] = ("douzero:WP",),
         top_k: int = 3,
         deadline_ms: int = 400,
         workers: int = 2,
@@ -95,6 +117,9 @@ class Advisor:
     ) -> None:
         self.archive = archive if archive is not None else Archive()
         self.default_agent = default_agent
+        #: ``auto`` 的偏好顺序：注册过谁就用谁，都没有再落到 ``default_agent``。
+        #: Phase 4 只要 ``advisor.register("douzero:WP", agent)``，auto 就会自动切过去。
+        self.auto_preference = tuple(auto_preference)
         self.default_top_k = top_k
         self.default_deadline_ms = deadline_ms
         self.strict_timeout = strict_timeout
@@ -128,6 +153,20 @@ class Advisor:
     def forget(self, key: str) -> bool:
         return self._sessions.pop(key, None) is not None
 
+    def resolve_auto(self) -> str:
+        """``auto`` 用哪个引擎：偏好列表里第一个已注册的，否则回到 ``default_agent``。"""
+        for spec in self.auto_preference:
+            if spec in self._agents:
+                return spec
+        if self.default_agent != "auto":
+            return self.default_agent
+        return "heuristic"
+
+    def available_engines(self) -> list[str]:
+        """当前真正能用的引擎（给浮窗/运维看的）。"""
+        ready = [spec for spec in self.auto_preference if spec in self._agents]
+        return ["heuristic", *ready]
+
     def register(self, name: str, agent: Agent) -> None:
         """预注册一个 agent 实例（测试替身、以及 Phase 4 的 DouZero 都走这里）。"""
         self._agents[name] = agent
@@ -136,11 +175,9 @@ class Advisor:
         """``spec`` → (agent, 实际用的名字)。``auto`` 用配置里的默认引擎。"""
         wanted = (spec or "auto").strip() or "auto"
         if wanted == "auto":
-            wanted = self.default_agent
-        if wanted == "auto":
-            wanted = "heuristic"
-        if wanted.startswith("douzero"):
-            # Phase 4：权重/上游代码就位后这里会返回真 agent；现在明确报"没有这个引擎"
+            wanted = self.resolve_auto()
+        if wanted.startswith("douzero") and wanted not in self._agents:
+            # Phase 4：权重/上游代码就位并 register 之后，这里就会返回真 agent
             return None, wanted
         if wanted not in self._agents:
             self._agents[wanted] = make(wanted)
@@ -148,7 +185,14 @@ class Advisor:
 
     # ----------------------------------------------------------------- 主入口
 
-    def advise(self, session_key: str, payload: Mapping[str, Any], options: AdviseOptions | None = None) -> dict:
+    def advise(
+        self,
+        session_key: str,
+        payload: Mapping[str, Any],
+        options: AdviseOptions | None = None,
+        *,
+        game_id: str | None = None,
+    ) -> dict:
         """核心入口：解析 → 组装基础信息 → （该给建议时）问 agent。"""
         options = options or AdviseOptions()
         session = self.session(session_key)
@@ -164,6 +208,9 @@ class Advisor:
                 "recommended": None,
                 "alternatives": [],
             }
+        if session.is_new_game(game_id, state.version):
+            session.reset(game_id)
+
         # 记住这份状态：``unchanged`` 刷新后的计时也要落地（客户端 ``accept()`` 同口径），
         # 但迟到的旧 version 不能把会话倒退回去。
         if session.state is None or state.version >= session.state.version:
@@ -195,7 +242,7 @@ class Advisor:
                 **base,
                 "ok": False,
                 "reason": "no_engine",
-                "message": f"引擎 {name} 还没就绪（DouZero 在 Phase 4 接入）",
+                "message": f"{name} 未就绪：缺 torch 或 third_party/DouZero 权重，切回启发式即可用",
                 "engine": {"name": name, "device": None, "fallback": False},
             }
 
@@ -384,6 +431,8 @@ class Advisor:
         return {
             "version": __version__,
             "default_agent": self.default_agent,
+            "auto_engine": self.resolve_auto(),
+            "available_engines": self.available_engines(),
             "top_k": self.default_top_k,
             "deadline_ms": self.default_deadline_ms,
             "sessions": len(self._sessions),
