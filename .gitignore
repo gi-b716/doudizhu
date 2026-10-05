@@ -1,0 +1,24 @@
+# 虚拟环境 / 构建产物
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# 测试与工具缓存
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# 数据：对局库与原始抓取（含真实牌局，不入库）
+data/games.jsonl
+data/raw/
+data/fixtures/
+
+# 竞技场输出
+runs/
+
+# 第三方：DouZero 仓库按 COMMIT.txt 现场 clone，权重是二进制大文件
+third_party/DouZero/
+*.ckpt

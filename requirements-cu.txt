@@ -1,0 +1,11 @@
+# 运行机（RTX 4060 Laptop）专用：在 requirements.txt 之上追加 CUDA 版 torch。
+#
+#   pip install -r requirements-cu.txt
+#
+# CUDA 版本按显卡驱动挑，以 https://pytorch.org/get-started/locally/ 当前指路为准
+# （下面这行是 2026-10 的 cu128 写法；驱动较旧时换 cu126/cu124）。
+# uv 用户可以直接：
+#   uv pip install torch --index-url https://download.pytorch.org/whl/cu128
+-r requirements.txt
+--extra-index-url https://download.pytorch.org/whl/cu128
+torch>=2.4

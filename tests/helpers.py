@@ -1,0 +1,95 @@
+"""测试辅助：把 ``"333444555666"`` 这类牌面简写展开成平台牌 id。
+
+简写支持紧凑与分隔两种写法：``"34567"`` / ``"3 4 5 6 7"`` / ``"小王 大王"`` / ``"10JQKA"``。
+同一张点数按 ♠♥♣♦ 顺序分配牌 id，所以简写 → 牌 id 是确定的。
+"""
+
+from __future__ import annotations
+
+import random
+from typing import Iterable
+
+from ddz import cards as C
+from ddz import patterns as P
+
+_SMALL = "小王"
+_BIG = "大王"
+
+_ALIAS: dict[str, int] = {
+    "3": 0, "4": 1, "5": 2, "6": 3, "7": 4, "8": 5, "9": 6,
+    "10": 7, "T": 7, "t": 7,
+    "J": 8, "j": 8, "Q": 9, "q": 9, "K": 10, "k": 10, "A": 11, "a": 11, "2": 12,
+    "w": 13, "W": 13, "小": 13, _SMALL: 13,
+    "d": 14, "D": 14, "大": 14, _BIG: 14,
+}
+
+
+def tokens(spec: str) -> list[str]:
+    """逐字符扫描：空白/逗号只是分隔，``10`` 与``小王`` 两字符优先。"""
+    text = spec.replace(",", " ").replace("，", " ")
+    out: list[str] = []
+    i = 0
+    while i < len(text):
+        if text[i].isspace():
+            i += 1
+            continue
+        two = text[i : i + 2]
+        if two in _ALIAS:
+            out.append(two)
+            i += 2
+        elif text[i] in _ALIAS:
+            out.append(text[i])
+            i += 1
+        else:
+            raise ValueError(f"无法解析的牌面：{spec!r}（第 {i} 个字符）")
+    return out
+
+
+def ranks_of_spec(spec: str) -> list[int]:
+    return [_ALIAS[token] for token in tokens(spec)]
+
+
+def cards_of(spec: str) -> list[int]:
+    """牌面简写 → 升序牌 id 列表。"""
+    used = [0] * C.N_RANKS
+    out: list[int] = []
+    for rank in ranks_of_spec(spec):
+        if rank >= C.JOKER_RANK:
+            out.append(C.JOKER_SMALL + (rank - C.JOKER_RANK))
+        else:
+            if used[rank] >= 4:
+                raise ValueError(f"牌面里点数 {C.RANK_NAMES[rank]} 超过 4 张")
+            out.append(rank * 4 + used[rank])
+            used[rank] += 1
+    return out
+
+
+def classify_keys(spec_or_cards: str | Iterable[int]) -> list[str]:
+    cards = cards_of(spec_or_cards) if isinstance(spec_or_cards, str) else list(spec_or_cards)
+    return [p.key() for p in P.classify(cards)]
+
+
+def reading(spec: str) -> P.Pattern:
+    """简写 → 它优先级最高的读法（断言存在）。"""
+    pattern = P.classify_one(cards_of(spec))
+    assert pattern is not None, f"{spec} 没有任何合法读法"
+    return pattern
+
+
+def rank_multiset(cards: Iterable[int]) -> tuple[int, ...]:
+    return tuple(sorted(C.ranks_of(cards)))
+
+
+def move_rank_keys(moves: Iterable) -> set[tuple[tuple[int, ...], str]]:
+    """把着法降到「点数多重集 + 牌型」层面——具体花色不影响合法性。"""
+    return {(rank_multiset(m.cards), m.pattern.key()) for m in moves}
+
+
+def random_hand(rng: random.Random, size: int, *, max_count: int = 3) -> list[int]:
+    """随机手牌；``max_count`` 限制同点数张数（默认排除炸弹，便于暴力对照）。"""
+    deck = C.full_deck()
+    for _ in range(200):
+        hand = rng.sample(deck, size)
+        if max(C.rank_counts(hand)) <= max_count:
+            return hand
+    raise AssertionError("生成不出满足条件的手牌")

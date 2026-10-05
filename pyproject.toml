@@ -1,0 +1,37 @@
+[project]
+name = "ddz-copilot"
+version = "0.1.0"
+description = "斗地主 Copilot：无界面模拟器 + 实时出牌建议（不代打）"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+    "pydantic>=2.7",
+    "numpy>=1.26",
+    "requests>=2.31",
+]
+
+# torch 不进默认依赖：开发机没有 GPU，整个服务必须能在无 torch 时以启发式运行。
+# 运行机（RTX 4060）执行：
+#   uv pip install torch --index-url https://download.pytorch.org/whl/cu128
+[project.optional-dependencies]
+cu = ["torch>=2.4"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-timeout>=2",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["ddz"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+timeout = 120
+addopts = "-q"
