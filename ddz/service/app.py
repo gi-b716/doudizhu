@@ -5,7 +5,9 @@
 是"私有网络"——Chrome 的 Private Network Access 预检要求响应里显式带上
 ``Access-Control-Allow-Private-Network: true``（PLAN §3.5）。
 
-Phase 1 只提供 ``/health`` 与 ``/ingest``；``/advise`` ``/config`` 在 Phase 3。
+端点：``/health`` ``/advise`` ``/ingest`` ``/config``。**逻辑问题一律 200**：响应里的
+``ok`` 说明成败，脚本不用区分状态码。所有编排都在 :mod:`ddz.service.advisor` 里，这里只做
+HTTP 与参数校验。
 """
 
 from __future__ import annotations
@@ -20,9 +22,10 @@ from fastapi.responses import JSONResponse
 
 from .. import __version__
 from ..data.archive import Archive
-from ..record import from_finished_state
-from ..state import StateParseError
-from .schemas import HealthResponse, IngestRequest, IngestResponse
+from .advisor import AdviseOptions, Advisor
+from .schemas import (
+    AdviseRequest, ConfigRequest, HealthResponse, IngestRequest, IngestResponse,
+)
 
 __all__ = ["create_app", "app", "HOST", "PORT"]
 
@@ -30,14 +33,11 @@ HOST = "127.0.0.1"
 PORT = 17876
 
 
-def create_app(archive: Archive | None = None) -> FastAPI:
+def create_app(archive: Archive | None = None, advisor: Advisor | None = None) -> FastAPI:
     app = FastAPI(title="ddz-copilot", version=__version__)
-    state: dict[str, Any] = {
-        "started_at": time.time(),
-        "archive": archive if archive is not None else Archive(),
-        "records": None,
-    }
-    app.state.ddz = state
+    advisor = advisor if advisor is not None else Advisor(archive=archive)
+    app.state.ddz = {"started_at": time.time(), "advisor": advisor}
+    app.state.advisor = advisor
 
     app.add_middleware(
         CORSMiddleware,
@@ -50,7 +50,6 @@ def create_app(archive: Archive | None = None) -> FastAPI:
 
     @app.middleware("http")
     async def allow_private_network(request: Request, call_next):
-        """PNA 预检：请求头带 ``Access-Control-Request-Private-Network`` 时回一个允许。"""
         response = await call_next(request)
         if request.headers.get("access-control-request-private-network") == "true":
             response.headers["Access-Control-Allow-Private-Network"] = "true"
@@ -58,9 +57,7 @@ def create_app(archive: Archive | None = None) -> FastAPI:
 
     @app.get("/health", response_model=HealthResponse)
     def health() -> HealthResponse:
-        records = state["records"]
-        if records is None:
-            records = state["archive"].count()
+        status = advisor.status()
         return HealthResponse(
             ok=True,
             version=__version__,
@@ -68,50 +65,36 @@ def create_app(archive: Archive | None = None) -> FastAPI:
             torch=importlib.util.find_spec("torch") is not None,
             cuda=False,
             douzero_loaded=False,
-            models={},
-            uptime_s=round(time.time() - state["started_at"], 3),
-            records=records,
+            models={"default": status["default_agent"]},
+            uptime_s=status["uptime_s"],
+            records=status["records"],
         )
+
+    @app.post("/advise")
+    def advise(request: AdviseRequest) -> dict[str, Any]:
+        options = AdviseOptions(
+            agent=request.options.agent,
+            top_k=request.options.top_k,
+            deadline_ms=request.options.deadline_ms,
+            for_seat=request.options.for_seat,
+        )
+        return advisor.advise(request.session, request.state, options)
 
     @app.post("/ingest", response_model=IngestResponse)
-    def ingest(request: IngestRequest) -> IngestResponse:
-        try:
-            record = from_finished_state(
-                request.state,
-                game_id=request.game_id,
-                captured_at=request.captured_at,
-                source=request.source,
-                seat_of_interest=request.seat_of_interest,
-            )
-        except StateParseError as exc:
-            # 逻辑问题也返回 200，让脚本只需要看 ok 字段（与 /advise 同一约定）
-            return IngestResponse(ok=False, reason="parse_error", message=str(exc))
-
-        archive_obj: Archive = state["archive"]
-        try:
-            added = archive_obj.add(
-                record, raw=request.state, keep_raw=request.keep_raw
-            )
-        except Exception as exc:  # 归档失败不该把脚本打挂
-            return IngestResponse(
-                ok=False, reason="archive_error", message=str(exc), game_id=record.game_id
-            )
-
-        total = state["records"]
-        if total is None:
-            total = archive_obj.count()  # 首次问询：直接数文件（已含刚写进去的这局）
-        elif added:
-            total += 1
-        state["records"] = total
-        return IngestResponse(
-            ok=True,
-            added=added,
-            duplicate=not added,
-            game_id=record.game_id,
-            dedupe_key=record.dedupe_key(),
-            records=total,
-            message="已归档" if added else "这局已经在库里了",
+    def ingest(request: IngestRequest) -> dict[str, Any]:
+        return advisor.ingest(
+            request.state,
+            game_id=request.game_id,
+            captured_at=request.captured_at,
+            source=request.source,
+            seat_of_interest=request.seat_of_interest,
+            keep_raw=request.keep_raw,
         )
+
+    @app.post("/config")
+    def config(request: ConfigRequest) -> dict[str, Any]:
+        applied = advisor.configure(**request.model_dump())
+        return {"ok": True, "applied": applied, **advisor.status()}
 
     @app.exception_handler(Exception)
     async def unhandled(request: Request, exc: Exception) -> JSONResponse:  # pragma: no cover

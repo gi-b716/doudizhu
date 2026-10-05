@@ -93,3 +93,87 @@ def random_hand(rng: random.Random, size: int, *, max_count: int = 3) -> list[in
         if max(C.rank_counts(hand)) <= max_count:
             return hand
     raise AssertionError("生成不出满足条件的手牌")
+
+
+# --------------------------------------------------------------------- 造局面
+
+
+def game_state(
+    spec_or_cards,
+    *,
+    to_beat=None,
+    seat: int = 0,
+    landlord: int | None = 1,
+    last_seat: int | None = None,
+    counts=None,
+    turn: int | None = None,
+    phase: str = "playing",
+    bottom=None,
+):
+    """手搓一个出牌阶段的状态，用来逐条测硬规则。
+
+    默认自己坐 0 号、地主是 1 号（于是 2 号是队友）；``to_beat`` 给定时，默认是**上家**
+    （2 号）刚打的，也就是"队友出的牌"——要测对手，就传 ``last_seat=1``。
+    """
+    from ddz.state import GameState, PlayerInfo, TableEntry
+
+    hand = cards_of(spec_or_cards) if isinstance(spec_or_cards, str) else list(spec_or_cards)
+    hand = C.sort_cards(hand)
+    if counts is None:
+        counts = [len(hand), 10, 10]
+    last = None
+    if to_beat is not None:
+        who = last_seat if last_seat is not None else (seat + 2) % 3
+        last = TableEntry(who, "play", (), to_beat)
+    leading = to_beat is None
+    players = [
+        PlayerInfo(
+            seat=i,
+            username=f"p{i}",
+            count=counts[i],
+            role=None if landlord is None else ("landlord" if landlord == i else "farmer"),
+        )
+        for i in range(3)
+    ]
+    return GameState(
+        seat=seat,
+        phase=phase,
+        turn=turn if turn is not None else seat,
+        leading=leading,
+        hand=tuple(hand),
+        landlord=landlord,
+        players=players,
+        last=last,
+        bottom=tuple(bottom) if bottom else None,
+    )
+
+
+class ScriptedAgent:
+    """测试用 agent：按剧本出牌/叫分，并记录它看到过的每一个状态。"""
+
+    def __init__(self, name: str = "scripted", *, bids=None, moves=None) -> None:
+        self.name = name
+        self.bids = list(bids or [])
+        self.moves = list(moves or [])
+        self.seen: list = []
+        self.bid_seen: list = []
+
+    def act(self, state):
+        from ddz.engine.base import Candidate
+
+        self.seen.append(state)
+        if not self.moves:
+            return Candidate(None, 0.0, ["剧本用完了"])
+        step = self.moves.pop(0)
+        if callable(step):
+            step = step(state)
+        return step if hasattr(step, "move") else Candidate(step, 0.0, ["剧本"])
+
+    def bid(self, state):
+        from ddz.engine.base import Bid
+
+        self.bid_seen.append(state)
+        if not self.bids:
+            return Bid(0, 0.0, ["剧本用完了"])
+        step = self.bids.pop(0)
+        return Bid(step if isinstance(step, int) else step(state), 0.0, ["剧本"])

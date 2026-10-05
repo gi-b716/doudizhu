@@ -30,7 +30,10 @@ from .patterns import (
     TRIPLE_SINGLE, Pattern, classify_beating,
 )
 
-__all__ = ["Move", "legal_moves", "legal_leads", "legal_beats", "has_any_beat", "winning_move"]
+__all__ = [
+    "Move", "legal_moves", "legal_leads", "legal_beats", "has_any_beat", "winning_move",
+    "wing_options",
+]
 
 #: 翅膀枚举的节点预算：非 canonical 模式下每点数最多取 3 张，正常手牌远达不到这个量级，
 #: 超预算时按代价顺序截断（代价低的先枚举）。
@@ -114,6 +117,25 @@ def winning_move(hand: Iterable[int], to_beat: Pattern | None = None) -> Move | 
     cards = tuple(C.sort_cards(hand))
     pattern = classify_beating(cards, to_beat)
     return Move(cards, pattern) if pattern is not None else None
+
+
+def wing_options(
+    hand: Iterable[int],
+    body_ranks: Iterable[int],
+    n_units: int,
+    kind: str = "single",
+    *,
+    limit: int | None = None,
+) -> list[tuple[tuple[int, int], ...]]:
+    """翅膀候选（点数多重集层），按代价升序——供拆解器等需要复用同一口径的地方。
+
+    ``kind='single'`` 时单位是「张」，``kind='pair'`` 时单位是「对」。``limit`` 只保留
+    最省的若干个（精确搜索里用来控制分支）。
+    """
+    # 只要最省的几个时顺手收窄枚举预算：候选池已按单价从低到高排过，先枚举出来的就是便宜的
+    budget = None if limit is None else max(4 * limit, 16)
+    wings = _wings(_Hand(hand), set(body_ranks), n_units, kind, False, budget=budget)
+    return wings if limit is None else wings[:limit]
 
 
 # --------------------------------------------------------------------- 手牌索引
@@ -328,6 +350,8 @@ def _wings(
     n_units: int,
     kind: str,
     canonical: bool,
+    *,
+    budget: int | None = None,
 ) -> list[tuple[tuple[int, int], ...]]:
     """枚举翅膀（点数多重集层），按代价升序。
 
@@ -365,12 +389,14 @@ def _wings(
     for i in range(size - 1, -1, -1):
         suffix[i] = suffix[i + 1] + pool[i][1]
 
+    limit = budget if budget is not None else _WING_BUDGET
+
     def walk(i: int, left: int, chosen: list[tuple[int, int]], cost: int) -> None:
         if left == 0:
             if not (kind == "single" and _has_rocket(chosen)):
                 results.append((cost, tuple(sorted(chosen))))
             return
-        if i >= size or suffix[i] < left:
+        if i >= size or suffix[i] < left or len(results) >= limit:
             return
         r, cap, _ = pool[i]
         for use in range(min(cap, left), -1, -1):
@@ -384,12 +410,9 @@ def _wings(
     walk(0, n_units, [], 0)
     if not results:
         return []
-    if canonical:
-        return [min(results)[1]]
-
     results.sort()
-    if len(results) > _WING_BUDGET:
-        results = results[:_WING_BUDGET]
+    if canonical:
+        return [results[0][1]]
     return [chosen for _, chosen in results]
 
 

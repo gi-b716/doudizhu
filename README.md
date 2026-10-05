@@ -11,8 +11,8 @@
 | --- | --- | --- |
 | 0 | 脚手架 + 规则引擎（`cards` / `patterns` / `moves`）+ rules 语料 | ✅ |
 | 1 | `state` / `record` / `counter` / `archive` + `/ingest` + `verify_fairness` | ✅ |
-| 2 | 拆解器 + 启发式 + 叫分 + 模拟器/竞技场 | 待做 |
-| 3 | 本地服务 + 油猴浮窗（仅启发式）→ 第一个可用版本 | 待做 |
+| 2 | 拆解器 + 启发式 + 叫分 + 模拟器/竞技场 | ✅ |
+| 3 | 本地服务 + 油猴浮窗（仅启发式）→ 第一个可用版本 | ✅ |
 | 4 | DouZero vendoring / bridge / agent / bench | 待做 |
 | 5 | 残局求解器 + 威胁提示 + 理由润色 | 待做 |
 
@@ -28,7 +28,36 @@ curl -X POST http://127.0.0.1:17876/ingest \
      -d '{"state": <终局 state>, "game_id": "12345", "keep_raw": true}'
 
 uv run python -m ddz.tools.verify_fairness --records data/games.jsonl
+
+# 自对弈竞技场：胜率 / ADP / 延迟报表 → runs/<名字>/summary.json
+uv run python -m ddz.arena.match --players heuristic,random,random --games 200 --seed 7 --rotate
+uv run python -m ddz.arena.match --players douzero:WP,heuristic,heuristic --games 300 --seed 11      --rotate --out runs/dz_vs_heur        # Phase 4
 ```
+
+### 装浮窗（Phase 3 起可用）
+
+1. 起服务：`uv run python -m ddz.service`（要一直开着；关掉后浮窗会显示「服务未启动」）。
+2. 浏览器装好 Tampermonkey / Violentmonkey，新建脚本，把 `userscript/ddz-copilot.user.js`
+   整个粘进去并保存。
+3. 打开真实对局页（`/games/doudizhu/...`）：右下角出现浮窗。轮到你时约 10–40ms 内出建议
+   （实测 p95 37ms，远早于 15 秒时限）；不是你的回合时显示「等待 X 出牌…」并把旧建议置灰，
+   同时照常给记牌器与威胁提示。
+4. 「帮我选中」是**显式 opt-in**：点一下才会替你在手牌上做选择（也可以勾上「轮到我时自动选」）。
+   它绝不点「出牌」、绝不对游戏接口发任何请求——出不出牌永远是你自己的事。
+5. 一局结束后自动归档到 `data/games.jsonl`（同一局重复抓到只留一行）。
+
+### 已知战绩（seed 7，200 局，座位轮换）
+
+| 对局 | 结果 |
+| --- | --- |
+| `heuristic` vs `random` ×2 | 胜率 **85.5%**，ADP +2.40，决策 p95 1.7ms |
+| `heuristic` ×3 自对弈 | 地主胜率 43.0%（接近真实对局的量级），平均倍数 1.24 |
+
+计分以 `src/rules.md` 为准：地主 ±2×底分×倍数、每位农民 ∓底分×倍数（PLAN §3.2 的示例差一个
+系数 2，已确认按 rules.md；实现只有 `ddz/arena/simulator.py:score_deltas` 一处）。
+
+启发式权重都在 `ddz.engine.heuristic.Weights`（默认值取自 PLAN §3.3）；调参时用竞技场看胜率、
+用 `ddz.tools.eval_records`（Phase 3 起）看与人类着法的一致率。
 
 真实抓到的终局 state 放进 `tests/fixtures/` 就会自动进测试流水线（见该目录的 README）。
 

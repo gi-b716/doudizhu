@@ -6,7 +6,10 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-__all__ = ["HealthResponse", "IngestRequest", "IngestResponse"]
+__all__ = [
+    "HealthResponse", "IngestRequest", "IngestResponse",
+    "AdviseOptionsModel", "AdviseRequest", "ConfigRequest",
+]
 
 
 class HealthResponse(BaseModel):
@@ -44,3 +47,33 @@ class IngestResponse(BaseModel):
     records: int = 0
     reason: str = ""
     message: str = ""
+
+
+class AdviseOptionsModel(BaseModel):
+    """``/advise`` 的 ``options``（都有默认值，脚本可以只传 state）。"""
+
+    agent: str = "auto"          # auto | heuristic | douzero:WP
+    top_k: int = 3
+    deadline_ms: int = 400
+    for_seat: int | None = None  # 指定替哪一家建议（默认：自己；旁观时是当前出牌者）
+
+
+class AdviseRequest(BaseModel):
+    """浮窗每步发过来的东西：原始平台 state + 会话标识。
+
+    ``state`` 就是 ``POST /games/doudizhu/api`` 响应里的 ``state`` 字段（也可能是
+    ``{"state": {...}}`` 外壳，两种都吃）。
+    """
+
+    session: str = "default"
+    state: dict[str, Any]
+    options: AdviseOptionsModel = Field(default_factory=AdviseOptionsModel)
+
+
+class ConfigRequest(BaseModel):
+    """``/config``：运行时切换默认引擎等。字段全可选。"""
+
+    default_agent: str | None = None
+    top_k: int | None = None
+    deadline_ms: int | None = None
+    forget_session: str | None = None
