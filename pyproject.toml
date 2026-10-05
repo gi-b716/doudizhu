@@ -22,6 +22,8 @@ cu = ["torch>=2.4"]
 dev = [
     "pytest>=8",
     "pytest-timeout>=2",
+    # FastAPI 的 TestClient 依赖 httpx（测 /ingest 与 Phase 3 的 /advise 用）
+    "httpx>=0.27",
 ]
 
 [build-system]
@@ -35,3 +37,7 @@ packages = ["ddz"]
 testpaths = ["tests"]
 timeout = 120
 addopts = "-q"
+filterwarnings = [
+    # starlette 1.7 起建议换 httpx2；我们跟 fastapi 官方 TestClient 走，等它切
+    "ignore:Using .httpx. with .starlette.testclient. is deprecated.*",
+]

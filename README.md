@@ -10,11 +10,27 @@
 | 阶段 | 内容 | 状态 |
 | --- | --- | --- |
 | 0 | 脚手架 + 规则引擎（`cards` / `patterns` / `moves`）+ rules 语料 | ✅ |
-| 1 | `state` / `record` / `counter` / `/ingest` + `verify_fairness` | 待做 |
+| 1 | `state` / `record` / `counter` / `archive` + `/ingest` + `verify_fairness` | ✅ |
 | 2 | 拆解器 + 启发式 + 叫分 + 模拟器/竞技场 | 待做 |
 | 3 | 本地服务 + 油猴浮窗（仅启发式）→ 第一个可用版本 | 待做 |
 | 4 | DouZero vendoring / bridge / agent / bench | 待做 |
 | 5 | 残局求解器 + 威胁提示 + 理由润色 | 待做 |
+
+## 用法
+
+```bash
+uv run python -m ddz.service            # 起本地服务（127.0.0.1:17876）
+curl http://127.0.0.1:17876/health      # {ok, version, torch, records, ...}
+
+# 归档一份终局 state（油猴脚本在 Phase 3 会自动打这个接口）
+curl -X POST http://127.0.0.1:17876/ingest \
+     -H 'Content-Type: application/json' \
+     -d '{"state": <终局 state>, "game_id": "12345", "keep_raw": true}'
+
+uv run python -m ddz.tools.verify_fairness --records data/games.jsonl
+```
+
+真实抓到的终局 state 放进 `tests/fixtures/` 就会自动进测试流水线（见该目录的 README）。
 
 ## 环境
 
@@ -58,13 +74,17 @@ git -C third_party/DouZero rev-parse HEAD > third_party/DouZero/COMMIT.txt   # �
 ```
 ddz/
   cards.py patterns.py moves.py   规则引擎：牌、牌型、合法着法（合法性的唯一来源）
-  explain.py                      中文文案集中处
+  state.py record.py              平台 state → 内部状态；对局库建模与逐前缀重放
+  counter.py explain.py           记牌器/威胁提示；全部中文文案
   engine/                         拆解器、启发式、叫分、残局求解器
   douzero/                        上游代码按路径装载、观测桥接、打分
-  agents/ arena/ data/ service/ tools/
+  data/archive.py                 games.jsonl 归档（按发牌去重）
+  service/                        FastAPI：/health /ingest（Phase 3 加 /advise）
+  tools/                          verify_fairness / bench_douzero / eval_records
+  agents/ arena/
 userscript/ddz-copilot.user.js    油猴浮窗（Shadow DOM）
 src/                              平台客户端与规则文档（只读参照）
-tests/                            语料 + 单测
+tests/                            语料 + 单测 + fixtures（真实抓包放这里）
 data/ runs/ third_party/          对局库、竞技场输出、DouZero（均 gitignore）
 ```
 

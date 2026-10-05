@@ -1,0 +1,684 @@
+{
+ "version": 50,
+ "seat": 0,
+ "phase": "finished",
+ "turn": null,
+ "remaining": null,
+ "reserve_in_remaining": 3000,
+ "reserve": [
+  15000,
+  15000,
+  15000
+ ],
+ "bid": 3,
+ "landlord": 1,
+ "must_bid": false,
+ "bottom": [
+  17,
+  18,
+  34
+ ],
+ "secret_bottom": [
+  17,
+  18,
+  34
+ ],
+ "hand": [],
+ "hands": [
+  [],
+  [
+   8,
+   11
+  ],
+  [
+   0,
+   1,
+   9
+  ]
+ ],
+ "table": [
+  {
+   "cards": [
+    3
+   ],
+   "pattern": {
+    "type": 1,
+    "rank": 0,
+    "len": 1
+   }
+  },
+  null,
+  null
+ ],
+ "last": {
+  "seat": 0,
+  "pattern": {
+   "type": 1,
+   "rank": 0,
+   "len": 1
+  }
+ },
+ "log": [
+  {
+   "t": 2067,
+   "kind": "bid",
+   "seat": 2,
+   "value": 0,
+   "timeout": false
+  },
+  {
+   "t": 2594,
+   "kind": "bid",
+   "seat": 0,
+   "value": 0,
+   "timeout": false
+  },
+  {
+   "t": 3186,
+   "kind": "bid",
+   "seat": 1,
+   "value": 3,
+   "timeout": false
+  },
+  {
+   "t": 6227,
+   "kind": "landlord",
+   "seat": 1,
+   "value": 3,
+   "cards": [
+    17,
+    18,
+    34
+   ]
+  },
+  {
+   "t": 8937,
+   "kind": "play",
+   "seat": 1,
+   "cards": [
+    16,
+    17,
+    18,
+    19,
+    23,
+    38
+   ],
+   "pattern": {
+    "type": 11,
+    "rank": 4,
+    "len": 1
+   },
+   "timeout": false
+  },
+  {
+   "t": 12330,
+   "kind": "pass",
+   "seat": 2,
+   "timeout": false
+  },
+  {
+   "t": 14667,
+   "kind": "pass",
+   "seat": 0,
+   "timeout": false
+  },
+  {
+   "t": 15697,
+   "kind": "play",
+   "seat": 1,
+   "cards": [
+    12,
+    15,
+    48,
+    49,
+    50
+   ],
+   "pattern": {
+    "type": 5,
+    "rank": 12,
+    "len": 1
+   },
+   "timeout": false
+  },
+  {
+   "t": 18992,
+   "kind": "pass",
+   "seat": 2,
+   "timeout": false
+  },
+  {
+   "t": 19301,
+   "kind": "pass",
+   "seat": 0,
+   "timeout": false
+  },
+  {
+   "t": 22830,
+   "kind": "play",
+   "seat": 1,
+   "cards": [
+    29
+   ],
+   "pattern": {
+    "type": 1,
+    "rank": 7,
+    "len": 1
+   },
+   "timeout": false
+  },
+  {
+   "t": 24377,
+   "kind": "play",
+   "seat": 2,
+   "cards": [
+    52
+   ],
+   "pattern": {
+    "type": 1,
+    "rank": 13,
+    "len": 1
+   },
+   "timeout": false
+  },
+  {
+   "t": 27053,
+   "kind": "play",
+   "seat": 0,
+   "cards": [
+    53
+   ],
+   "pattern": {
+    "type": 1,
+    "rank": 14,
+    "len": 1
+   },
+   "timeout": false
+  },
+  {
+   "t": 28623,
+   "kind": "pass",
+   "seat": 1,
+   "timeout": false
+  },
+  {
+   "t": 30015,
+   "kind": "pass",
+   "seat": 2,
+   "timeout": false
+  },
+  {
+   "t": 30999,
+   "kind": "play",
+   "seat": 0,
+   "cards": [
+    13,
+    40,
+    41,
+    43
+   ],
+   "pattern": {
+    "type": 4,
+    "rank": 10,
+    "len": 1
+   },
+   "timeout": false
+  },
+  {
+   "t": 31404,
+   "kind": "play",
+   "seat": 1,
+   "cards": [
+    4,
+    44,
+    45,
+    46
+   ],
+   "pattern": {
+    "type": 4,
+    "rank": 11,
+    "len": 1
+   },
+   "timeout": false
+  },
+  {
+   "t": 34814,
+   "kind": "pass",
+   "seat": 2,
+   "timeout": false
+  },
+  {
+   "t": 36247,
+   "kind": "pass",
+   "seat": 0,
+   "timeout": false
+  },
+  {
+   "t": 36604,
+   "kind": "play",
+   "seat": 1,
+   "cards": [
+    27
+   ],
+   "pattern": {
+    "type": 1,
+    "rank": 6,
+    "len": 1
+   },
+   "timeout": false
+  },
+  {
+   "t": 37628,
+   "kind": "play",
+   "seat": 2,
+   "cards": [
+    37
+   ],
+   "pattern": {
+    "type": 1,
+    "rank": 9,
+    "len": 1
+   },
+   "timeout": false
+  },
+  {
+   "t": 38093,
+   "kind": "play",
+   "seat": 0,
+   "cards": [
+    47
+   ],
+   "pattern": {
+    "type": 1,
+    "rank": 11,
+    "len": 1
+   },
+   "timeout": false
+  },
+  {
+   "t": 39416,
+   "kind": "pass",
+   "seat": 1,
+   "timeout": false
+  },
+  {
+   "t": 40706,
+   "kind": "play",
+   "seat": 2,
+   "cards": [
+    51
+   ],
+   "pattern": {
+    "type": 1,
+    "rank": 12,
+    "len": 1
+   },
+   "timeout": false
+  },
+  {
+   "t": 44621,
+   "kind": "pass",
+   "seat": 0,
+   "timeout": false
+  },
+  {
+   "t": 45777,
+   "kind": "pass",
+   "seat": 1,
+   "timeout": false
+  },
+  {
+   "t": 47500,
+   "kind": "play",
+   "seat": 2,
+   "cards": [
+    14,
+    24,
+    25,
+    26
+   ],
+   "pattern": {
+    "type": 4,
+    "rank": 6,
+    "len": 1
+   },
+   "timeout": false
+  },
+  {
+   "t": 49035,
+   "kind": "pass",
+   "seat": 0,
+   "timeout": false
+  },
+  {
+   "t": 52031,
+   "kind": "pass",
+   "seat": 1,
+   "timeout": false
+  },
+  {
+   "t": 55224,
+   "kind": "play",
+   "seat": 2,
+   "cards": [
+    33,
+    35
+   ],
+   "pattern": {
+    "type": 2,
+    "rank": 8,
+    "len": 1
+   },
+   "timeout": false
+  },
+  {
+   "t": 58039,
+   "kind": "play",
+   "seat": 0,
+   "cards": [
+    36,
+    39
+   ],
+   "pattern": {
+    "type": 2,
+    "rank": 9,
+    "len": 1
+   },
+   "timeout": false
+  },
+  {
+   "t": 58790,
+   "kind": "pass",
+   "seat": 1,
+   "timeout": false
+  },
+  {
+   "t": 62700,
+   "kind": "pass",
+   "seat": 2,
+   "timeout": false
+  },
+  {
+   "t": 66399,
+   "kind": "play",
+   "seat": 0,
+   "cards": [
+    2
+   ],
+   "pattern": {
+    "type": 1,
+    "rank": 0,
+    "len": 1
+   },
+   "timeout": false
+  },
+  {
+   "t": 67288,
+   "kind": "play",
+   "seat": 1,
+   "cards": [
+    34
+   ],
+   "pattern": {
+    "type": 1,
+    "rank": 8,
+    "len": 1
+   },
+   "timeout": false
+  },
+  {
+   "t": 68765,
+   "kind": "play",
+   "seat": 2,
+   "cards": [
+    42
+   ],
+   "pattern": {
+    "type": 1,
+    "rank": 10,
+    "len": 1
+   },
+   "timeout": false
+  },
+  {
+   "t": 70351,
+   "kind": "pass",
+   "seat": 0,
+   "timeout": false
+  },
+  {
+   "t": 73094,
+   "kind": "pass",
+   "seat": 1,
+   "timeout": false
+  },
+  {
+   "t": 74008,
+   "kind": "play",
+   "seat": 2,
+   "cards": [
+    5,
+    6,
+    7,
+    28
+   ],
+   "pattern": {
+    "type": 4,
+    "rank": 1,
+    "len": 1
+   },
+   "timeout": false
+  },
+  {
+   "t": 76886,
+   "kind": "play",
+   "seat": 0,
+   "cards": [
+    20,
+    21,
+    22,
+    32
+   ],
+   "pattern": {
+    "type": 4,
+    "rank": 5,
+    "len": 1
+   },
+   "timeout": false
+  },
+  {
+   "t": 79160,
+   "kind": "pass",
+   "seat": 1,
+   "timeout": false
+  },
+  {
+   "t": 82343,
+   "kind": "pass",
+   "seat": 2,
+   "timeout": false
+  },
+  {
+   "t": 85471,
+   "kind": "play",
+   "seat": 0,
+   "cards": [
+    30,
+    31
+   ],
+   "pattern": {
+    "type": 2,
+    "rank": 7,
+    "len": 1
+   },
+   "timeout": false
+  },
+  {
+   "t": 87565,
+   "kind": "pass",
+   "seat": 1,
+   "timeout": false
+  },
+  {
+   "t": 91385,
+   "kind": "pass",
+   "seat": 2,
+   "timeout": false
+  },
+  {
+   "t": 95231,
+   "kind": "play",
+   "seat": 0,
+   "cards": [
+    10
+   ],
+   "pattern": {
+    "type": 1,
+    "rank": 2,
+    "len": 1
+   },
+   "timeout": false
+  },
+  {
+   "t": 96103,
+   "kind": "pass",
+   "seat": 1,
+   "timeout": false
+  },
+  {
+   "t": 99571,
+   "kind": "pass",
+   "seat": 2,
+   "timeout": false
+  },
+  {
+   "t": 102946,
+   "kind": "play",
+   "seat": 0,
+   "cards": [
+    3
+   ],
+   "pattern": {
+    "type": 1,
+    "rank": 0,
+    "len": 1
+   },
+   "timeout": false
+  },
+  {
+   "t": 105592,
+   "kind": "finish",
+   "seat": 0
+  }
+ ],
+ "multiplier": 1,
+ "bombs": 0,
+ "players": [
+  {
+   "username": "p0",
+   "count": 0,
+   "bid": null,
+   "role": "farmer",
+   "auto": false
+  },
+  {
+   "username": "p1",
+   "count": 2,
+   "bid": null,
+   "role": "landlord",
+   "auto": false
+  },
+  {
+   "username": "p2",
+   "count": 3,
+   "bid": null,
+   "role": "farmer",
+   "auto": false
+  }
+ ],
+ "started": 1700000000000,
+ "redeals": 0,
+ "leading": false,
+ "fairness": {
+  "commitments": [
+   "61d6fabce035f003229c5fc58df2b6af449f8291ff4532c7e1c077993bf921b0"
+  ],
+  "deals": [
+   {
+    "index": 0,
+    "deck": [
+     3,
+     36,
+     53,
+     22,
+     13,
+     31,
+     10,
+     32,
+     47,
+     20,
+     40,
+     21,
+     2,
+     30,
+     39,
+     41,
+     43,
+     15,
+     16,
+     19,
+     38,
+     27,
+     44,
+     48,
+     45,
+     4,
+     29,
+     8,
+     12,
+     46,
+     11,
+     50,
+     23,
+     49,
+     0,
+     14,
+     24,
+     37,
+     26,
+     28,
+     42,
+     52,
+     51,
+     7,
+     5,
+     1,
+     33,
+     35,
+     6,
+     9,
+     25,
+     18,
+     34,
+     17
+    ],
+    "salt": "0571a72c9c42c21cf98441ad10762e5e",
+    "commitment": "61d6fabce035f003229c5fc58df2b6af449f8291ff4532c7e1c077993bf921b0",
+    "first_bidder": 2
+   }
+  ]
+ },
+ "result": {
+  "landlord_won": false,
+  "spring": false,
+  "anti_spring": false,
+  "base": 3,
+  "multiplier": 1,
+  "deltas": [
+   3,
+   -6,
+   3
+  ],
+  "finished": true
+ },
+ "match": null
+}
