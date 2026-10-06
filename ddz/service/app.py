@@ -13,6 +13,7 @@ HTTP 与参数校验。
 from __future__ import annotations
 
 import importlib.util
+import sys
 import time
 from typing import Any
 
@@ -57,15 +58,23 @@ def create_app(archive: Archive | None = None, advisor: Advisor | None = None) -
 
     @app.get("/health", response_model=HealthResponse)
     def health() -> HealthResponse:
+        from ..douzero import agent as douzero_agent
+
         status = advisor.status()
+        douzero = douzero_agent.status()
+        ready = bool(douzero.get("ready"))
         return HealthResponse(
             ok=True,
             version=__version__,
-            # torch 只是"装没装"的探测；真实加载状态由 Phase 4 的 douzero.agent 提供
             torch=importlib.util.find_spec("torch") is not None,
-            cuda=False,
-            douzero_loaded=False,
-            models={"default": status["default_agent"]},
+            cuda=bool(douzero.get("cuda")),
+            douzero_loaded=ready,
+            python=sys.executable,
+            models={
+                "default": status["default_agent"],
+                "auto_engine": status.get("auto_engine"),
+                **({"douzero": "douzero:WP"} if ready else {}),
+            },
             uptime_s=status["uptime_s"],
             records=status["records"],
         )

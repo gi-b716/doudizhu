@@ -38,7 +38,14 @@ class SpyAgent:
 
 
 @pytest.fixture()
-def advisor(tmp_path) -> Advisor:
+def advisor(tmp_path, monkeypatch) -> Advisor:
+    """本文件测的是**编排**（会话、缓存、超时回退、给不出建议的形态），不是引擎选择。
+
+    所以这里关掉"就绪的引擎自己注册进来"：装了权重之后 auto 会切到 ``douzero:WP``，
+    这些用例就会变成在测 DouZero，而且每个用例还要多花两秒装载模型。引擎选择有专门的
+    用例（本文件末尾那一组），真实注册那条接缝由 ``test_ready_engines_register_themselves`` 盯着。
+    """
+    monkeypatch.setattr(Advisor, "_register_available_engines", lambda self: None)
     return Advisor(archive=Archive(tmp_path / "games.jsonl", raw_path=tmp_path / "raw"))
 
 
@@ -228,6 +235,7 @@ def test_parse_error_is_reported_not_raised(advisor, bad):
 
 
 def test_unknown_engine_reports_no_engine(advisor):
+    """点名一个没注册的引擎：明确说没有，**不静默换引擎**，但记牌器照给。"""
     result = advisor.advise("s1", my_turn_state(), AdviseOptions(agent="douzero:WP"))
     assert result["ok"] is False and result["reason"] == "no_engine"
     assert result["engine"]["name"] == "douzero:WP"
@@ -303,6 +311,8 @@ def test_configure_can_forget_a_session(advisor):
 
 
 def test_auto_engine_resolves_to_heuristic(advisor):
+    """偏好列表里没人可用时，auto 落到启发式（而不是报错）。"""
+    assert advisor.available_engines() == ["heuristic"]
     result = advisor.advise("s1", my_turn_state(), AdviseOptions(agent="auto"))
     assert result["engine"]["name"] == "heuristic"
 
@@ -352,6 +362,11 @@ def test_explicit_heuristic_still_wins_over_auto(advisor):
 
 
 def test_douzero_not_ready_says_so_and_keeps_the_counter(advisor):
+    """引擎用不了时也要把记牌器/手牌分析给出来（浮窗不能一片空白）。
+
+    这里的"没就绪"是 fixture 关掉自动注册造出来的；权重装好后显式点 DouZero 的真路径
+    由 ``test_service_advise.py::test_agent_option_can_force_the_engine`` 覆盖。
+    """
     result = advisor.advise("s1", my_turn_state(), AdviseOptions(agent="douzero:WP"))
     assert result["ok"] is False and result["reason"] == "no_engine"
     assert "启发式" in result["message"]
@@ -365,6 +380,25 @@ def test_status_lists_available_engines(advisor):
     assert status["auto_engine"] == "heuristic"
     advisor.register("douzero:WP", StubEngine())
     assert advisor.status()["auto_engine"] == "douzero:WP"
+
+
+def test_ready_engines_register_themselves(tmp_path):
+    """**没有**替身顶掉自动注册时，就绪的引擎要自己进来——Phase 4 的接缝就在这。
+
+    fixture 把它关掉是为了让上面的用例稳定；这里把它放回来，两种机器上都成立：
+    权重就位 → auto 是 DouZero；没就位 → auto 老实回到启发式。
+    """
+    from ddz.douzero import agent as douzero_agent
+
+    advisor = Advisor(archive=Archive(tmp_path / "games.jsonl", raw_path=tmp_path / "raw"))
+    if douzero_agent.is_ready():
+        assert advisor.available_engines() == ["heuristic", "douzero:WP"]
+        assert advisor.resolve_auto() == "douzero:WP"
+        agent, name = advisor.agent_for("auto")
+        assert name == "douzero:WP" and agent is not None
+    else:
+        assert advisor.available_engines() == ["heuristic"]
+        assert advisor.resolve_auto() == "heuristic"
 
 
 # --------------------------------------------------------------------- 换局（跨局缓存串号）
@@ -450,3 +484,76 @@ def test_session_remembers_which_game_it_is_on(advisor):
     advisor.advise("tab", next(s for s in other if s["turn"] == s["seat"] and s["phase"] == "playing"),
                    game_id="g2")
     assert advisor.session("tab").game_id == "g2"
+
+
+def test_engine_block_reports_the_device_when_the_engine_has_one(advisor):
+    """设备由引擎自己报（DouZero 报 cpu/cuda，浮窗页脚就显示它）。
+
+    引擎没有 ``status()``、或者它自己的状态接口炸了，都只能是"没有设备"——
+    绝不能因此让一条本来好好的建议变成错误。
+    """
+    class DeviceEngine(SpyAgent):
+        def status(self):
+            return {"device": "cuda"}
+
+    advisor.register("heuristic", DeviceEngine(name="heuristic"))
+    result = advisor.advise("s1", my_turn_state(), AdviseOptions(agent="heuristic"))
+    assert result["engine"]["device"] == "cuda"
+
+    class BrokenStatus(SpyAgent):
+        def status(self):
+            raise RuntimeError("状态接口炸了")
+
+    advisor.register("heuristic", BrokenStatus(name="heuristic"))
+    ok = advisor.advise("s2", my_turn_state(), AdviseOptions(agent="heuristic"))
+    assert ok["ok"] is True
+    assert ok["engine"]["device"] is None
+
+    advisor.register("heuristic", SpyAgent(name="heuristic"))   # 连 status 都没有
+    plain = advisor.advise("s3", my_turn_state(), AdviseOptions(agent="heuristic"))
+    assert plain["ok"] is True and plain["engine"]["device"] is None
+
+
+def test_weights_that_arrive_later_are_picked_up_without_a_restart(tmp_path, monkeypatch):
+    """权重是服务起来**之后**才放好的：不该要求用户重启。
+
+    用户看到的就是这个症状——``/health`` 说 ``douzero_loaded:true``（每请求现算的），
+    ``/advise`` 却说 ``no_engine``（注册只是构造时那一次的快照），两个字段互相打架。
+    权重从 Drive 下下来要时间，这个窗口是常态，不是意外。
+    """
+    from ddz.douzero import agent as dz
+    from ddz.moves import Move
+    from ddz.patterns import Pattern
+
+    ready = {"value": False}
+
+    class LateDouZero:
+        name = "douzero:WP"
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def load(self):
+            return True
+
+        def status(self):
+            return {"device": "cpu"}
+
+        def act(self, state):
+            return Candidate(Move((0,), Pattern("single", 0)), 0.0, ["替身 DouZero"], ["stub"], self.name)
+
+    monkeypatch.setattr(dz, "DouZeroAgent", LateDouZero)
+    monkeypatch.setattr(dz, "is_ready", lambda: ready["value"])
+
+    advisor = Advisor(archive=Archive(tmp_path / "games.jsonl", raw_path=tmp_path / "raw"))
+    assert advisor.available_engines() == ["heuristic"]      # 服务起来时权重还没到
+    early = advisor.advise("s1", my_turn_state(), AdviseOptions(agent="douzero:WP"))
+    assert early["ok"] is False and early["reason"] == "no_engine"
+
+    ready["value"] = True                                    # 用户这时候把权重放进去了
+    late = advisor.advise("s1", my_turn_state(), AdviseOptions(agent="douzero:WP"))
+    assert late["ok"] is True
+    assert late["engine"]["name"] == "douzero:WP"
+    assert late["engine"]["device"] == "cpu"
+    assert advisor.available_engines() == ["heuristic", "douzero:WP"]
+    assert advisor.resolve_auto() == "douzero:WP"

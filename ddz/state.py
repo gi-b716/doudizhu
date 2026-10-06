@@ -208,24 +208,33 @@ class GameState:
 
     @property
     def seen_cards(self) -> set[int]:
-        """我确定位置的牌：自己的手牌 + 已出的牌。
+        """被建议的那个座位确定位置的牌（手牌 + 已出的牌）。"""
+        return self.seen_cards_for(self.advise_seat)
+
+    def seen_cards_for(self, seat: int | None) -> set[int]:
+        """某个座位确定位置的牌：他的手牌 + 已出的牌。
 
         地主确定后底牌是公开的，但它属于地主的手牌、且能与他手里的牌凑成炸弹，所以
         仍算"未见"（与客户端记牌器同口径）。
         """
-        hand = self.advise_hand or ()
-        return set(hand) | set(self.played_cards)
+        hand = self.hand_for(seat) if seat is not None else None
+        return set(hand or ()) | set(self.played_cards)
 
     @property
     def unseen(self) -> tuple[int, ...]:
-        """未见牌的具体牌 id（每点数取 id 最小的若干张，约定见模块文档）。
+        """被建议座位的未见牌。需要别的座位的视角时用 :meth:`unseen_for`。"""
+        return self.unseen_for(self.advise_seat)
+
+    def unseen_for(self, seat: int | None) -> tuple[int, ...]:
+        """``seat`` 视角下的未见牌（每点数取 id 最小的若干张，约定见模块文档）。
 
         只有**点数多重集**有意义——花色在斗地主里不可观测。需要计数请用
         :attr:`unseen_ranks`。
+
+        注意别用错视角：给 DouZero 桥接时是**出牌的那个座位**，不是会话主人。
         """
-        deck = C.full_deck()
-        unknown = [c for c in deck if c not in self.seen_cards]
-        return tuple(unknown)
+        seen = self.seen_cards_for(seat)
+        return tuple(card for card in C.full_deck() if card not in seen)
 
     @property
     def unseen_ranks(self) -> list[int]:

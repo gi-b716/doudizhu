@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
@@ -130,6 +131,9 @@ class Advisor:
         self.records: int | None = None
         self._sessions: dict[str, Session] = {}
         self._agents: dict[str, Agent] = {}
+        #: 注册引擎要拿锁：请求在线程池里跑，两个并发的 /advise 不该各装一份模型
+        self._engine_lock = threading.Lock()
+        self._register_available_engines()
         self._executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="ddz-advise")
         self._analysis_cache: dict[tuple[int, ...], dict] = {}
         self._fallback: Agent | None = None
@@ -156,6 +160,33 @@ class Advisor:
     def forget(self, key: str) -> bool:
         return self._sessions.pop(key, None) is not None
 
+    def _register_available_engines(self) -> None:
+        """把已经就绪的引擎注册进来（Phase 4 的 DouZero 走这条路，脚本不用改）。
+
+        **可以反复调用**，而且必须能：权重经常是服务起来之后才放好的（下载要时间），
+        只在 ``__init__`` 里试一次的话，用户不重启就永远等不到 DouZero——而他看到的
+        是 ``/health`` 说 ``douzero_loaded:true``（那是每请求现算的）、``/advise`` 却说
+        ``no_engine``（注册是启动时那一次的快照），两个字段互相打架。
+
+        已经注册过的直接跳过，所以正常路径上这个函数是零开销；没就绪时也只多一次
+        ``find_spec`` + 几次 ``exists()``，远小于一次建议请求本身。
+        """
+        with self._engine_lock:
+            for spec in self.auto_preference:
+                if spec in self._agents:
+                    continue
+                try:
+                    if spec.startswith("douzero"):
+                        from ..douzero.agent import DouZeroAgent, is_ready
+
+                        if not is_ready():
+                            continue
+                        agent = DouZeroAgent()
+                        if agent.load():
+                            self.register(spec, agent)
+                except Exception as exc:  # 引擎没装好不影响启发式路径
+                    log.info("%s 未注册（%s），继续用启发式", spec, exc)
+
     def resolve_auto(self) -> str:
         """``auto`` 用哪个引擎：偏好列表里第一个已注册的，否则回到 ``default_agent``。"""
         for spec in self.auto_preference:
@@ -175,7 +206,12 @@ class Advisor:
         self._agents[name] = agent
 
     def agent_for(self, spec: str) -> tuple[Agent | None, str]:
-        """``spec`` → (agent, 实际用的名字)。``auto`` 用配置里的默认引擎。"""
+        """``spec`` → (agent, 实际用的名字)。``auto`` 用配置里的默认引擎。
+
+        进来先补一次注册：权重可能是在服务启动**之后**才放好的，这时候不该要求用户重启
+        （见 :meth:`_register_available_engines`）。
+        """
+        self._register_available_engines()
         wanted = (spec or "auto").strip() or "auto"
         if wanted == "auto":
             wanted = self.resolve_auto()
@@ -185,6 +221,22 @@ class Advisor:
         if wanted not in self._agents:
             self._agents[wanted] = make(wanted)
         return self._agents[wanted], self._agents[wanted].name
+
+    @staticmethod
+    def _engine_info(agent: Any, name: str, *, fallback: bool = False) -> dict:
+        """响应里 ``engine`` 块的统一形状。
+
+        设备只有引擎自己说得清（DouZero 报 cpu/cuda，启发式没有这个概念），所以向 agent 要：
+        它要是没有 ``status()``、或者自己的状态接口炸了，就当没有设备——**不能因此让建议失败**。
+        """
+        device = None
+        status = getattr(agent, "status", None)
+        if callable(status):
+            try:
+                device = status().get("device")
+            except Exception:
+                device = None
+        return {"name": name, "device": device, "fallback": fallback}
 
     # ----------------------------------------------------------------- 主入口
 
@@ -273,9 +325,7 @@ class Advisor:
             "recommended": self._describe(candidate, options.top_k),
             "alternatives": [self._describe(alt, 0) for alt in candidate.alternatives[: max(0, options.top_k - 1)]],
             "engine": {
-                "name": name,
-                "device": None,
-                "fallback": fallback,
+                **self._engine_info(agent, name, fallback=fallback),
                 "tags": list(candidate.tags),
             },
             "timing_ms": {
@@ -304,7 +354,7 @@ class Advisor:
                 "legal": view.legal_bids,
                 "rationale": list(bid.reasons),
             },
-            "engine": {"name": name, "device": None, "fallback": False},
+            "engine": self._engine_info(agent, name),
             "timing_ms": {
                 **base["timing_ms"],
                 "agent": round((time.perf_counter() - started) * 1000.0 - base["timing_ms"]["parse"], 3),

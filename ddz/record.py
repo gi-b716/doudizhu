@@ -558,7 +558,9 @@ class _Replayer:
             players=players,
             table=list(self.table),
             last=self.last,
-            events=list(events),
+            # GameState.events 的类型统一成 list[dict]（和 from_platform_state 一致）：
+            # 重放出来的帧以前塞的是 Event 对象，下游按 dict 取值会炸
+            events=[entry.to_dict() for entry in events],
             deal_index=self.deal_index,
             played_by_seat=[tuple(sorted(c)) for c in self._played],
             redeals=self.redeals,

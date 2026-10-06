@@ -80,9 +80,24 @@ def test_default_out_dir_encodes_players_and_seed():
 def test_unknown_agent_names_are_rejected():
     with pytest.raises(ValueError, match="不认识的 agent"):
         make("teleporter")
-    with pytest.raises(NotImplementedError, match="Phase 4"):
-        make("douzero:WP")
-    assert available() == ["heuristic", "random"]
+    assert "heuristic" in available() and "random" in available()
+
+
+def test_douzero_make_degrades_gracefully():
+    """没装 torch/权重时 make 不该抛，而是给出一个"未就绪、会回落启发式"的 agent。
+
+    （这台机器上权重已就位，所以那半边由 ``test_douzero_agent.py`` 覆盖；这里两个分支都认。）
+    """
+    from ddz.douzero.agent import is_ready
+    from helpers import game_state
+
+    agent = make("douzero:WP")
+    assert agent.name == "douzero:WP"
+    candidate = agent.act(game_state("34567 88"))
+    assert not candidate.is_pass or agent.loaded is False
+    if not is_ready():
+        assert agent.loaded is False and agent.last_error
+        assert any("回落启发式" in reason for reason in candidate.reasons)
 
 
 def test_heuristic_beats_random_comfortably():

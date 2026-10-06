@@ -13,7 +13,7 @@
 | 1 | `state` / `record` / `counter` / `archive` + `/ingest` + `verify_fairness` | ✅ |
 | 2 | 拆解器 + 启发式 + 叫分 + 模拟器/竞技场 | ✅ |
 | 3 | 本地服务 + 油猴浮窗（启发式）+ **自动代打** | ✅ |
-| 4 | DouZero vendoring / bridge / agent / bench | 待做 |
+| 4 | DouZero vendoring / bridge / agent / bench | ✅（**差真权重**） |
 | 5 | 残局求解器 + 威胁提示 + 理由润色 | 待做 |
 
 ## 用法
@@ -51,6 +51,24 @@ uv run python -m ddz.arena.match --players douzero:WP,heuristic,heuristic --game
    动作没做成（按钮/手牌还没渲染出来）会自动重试，并把原因显示在状态行上。
 6. 「帮我选中」是手动版：点一下才替你在手牌上做选择。
 7. 一局结束后自动归档到 `data/games.jsonl`（同一局重复抓到只留一行）。
+
+### DouZero（Phase 4）
+
+```bash
+uv pip install torch --index-url https://download.pytorch.org/whl/cpu   # CPU 够用，4060 也可装 cu128
+git clone https://github.com/kwai/DouZero.git third_party/DouZero       # 已 clone，commit 记在 COMMIT.txt
+# 然后把官方 Drive / 百度网盘下的三件套放进 third_party/DouZero/baselines/douzero_WP/
+uv run python -m ddz.tools.bench_douzero --games 10                     # 验收线：p95 < 50ms
+```
+
+⚠️ **装了 torch 之后别再裸跑 `uv sync`**——它会把这不在 lockfile 里的包当多余依赖删掉。
+继续用 `uv sync --inexact`（或者干脆不管，torch 是可选依赖）。
+
+权重没到位时**不会报错**：`/health` 报 `douzero_loaded:false`，浮窗上选 DouZero 会说明原因并
+提示切回启发式，所有建议照常由启发式给出。权重一放好，`auto` 会自动切到 DouZero（脚本不用改）。
+
+用随机初始化的替身权重验过整条管道（装载 1.4s；248 个真实局面 p50 0.5ms / p95 1.5ms，
+CPU）——**那只证明管道通，不证明棋力**；棋力要等真权重。
 
 ### 已知战绩（seed 7，200 局，座位轮换）
 
@@ -146,7 +164,15 @@ data/ runs/ third_party/          对局库、竞技场输出、DouZero（均 gi
   版本抖动全部不进模型。
 - 牌 id 与平台一致（`id = rank * 4 + suit`，52/53 为两张王），零翻译；`rank` 把两张王拆成
   13/14，因为牌型比较要求点数全序。
-- 与上游唯一的有意规则差异：上游「四带两对」允许 `3333+4444`，rules.md 禁止，由我们的合法集拦住。
+- 与上游的规则差异**只有两类**，都是 rules.md 的规定、我们有意照它实现：① 生成时不拆炸弹当翅膀；
+  ② 翅膀里不能带王炸。PLAN §0.2 里说的「上游四带两对允许 `3333+4444`」经核对**不成立**
+  （上游 `gen_type_14_4_22` 要求两个翅膀点数不同），闸二把真实的差异类别钉住了。
+- **规则引擎被平台自己的实现验证过**：`src/doudizhu-rules.js` 在 node 里跑，与我们的引擎比对
+  全部读法、14×14 两两压牌、`patternKey` 逐字（`tests/test_platform_parity.py`）。
+- **DouZero 接的是上游原版**：按文件路径装载叶子模块（绕开 `dmc/__init__.py` 里那条 `import git`
+  的死依赖），观测**直接调用上游 `get_obs()`**，合法动作永远由 `ddz.moves` 生成。两道正确性闸：
+  ① 用上游 `GameEnv` 重放同一局、逐决策点比对观测（`test_douzero_bridge.py`）；② 与上游
+  `MovesGener` 逐手对照合法集（`test_douzero_legality_parity.py`）。
 - **合法性口径 vs 生成口径**：`ddz.patterns.classify` 认牌组本身的一切合法读法（含「拿炸弹里的
   两张当翅膀」）；而 `ddz.moves` 生成候选时**绝不拆炸弹、绝不拆出王炸**当翅膀——这与上游
   DouZero `MovesGener` 的口径一致，也让「炸弹是一手牌」这个直觉不被自家候选集破坏。

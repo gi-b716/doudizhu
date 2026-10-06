@@ -215,3 +215,75 @@ def test_deals_capped_and_no_redeal_loop():
 def test_simulator_requires_three_agents():
     with pytest.raises(ValueError):
         Simulator([RandomAgent(seed=1)])
+
+
+# --------------------------------------------------------------------- 状态保真
+
+
+def test_simulator_states_carry_the_full_history():
+    """agent 看到的状态必须带完整历史。
+
+    这条是有血的教训：竞技场以前把 ``events`` 留空，启发式不读它所以看不出问题，
+    但 DouZero 的观测正是从这串历史编码出来的——结果是它在竞技场里"瞎打"
+    （自对弈地主胜率一度 82.5%）。所以这里逐条对账。
+    """
+    recorded: list = []
+
+    class Recorder(RandomAgent):
+        def act(self, state):
+            recorded.append(state)
+            return super().act(state)
+
+    outcome = play([Recorder(seed=1), Recorder(seed=2), Recorder(seed=3)], 4)
+    assert recorded and outcome.errors == 0
+    for index, state in enumerate(recorded):
+        events = state.events
+        # 历史条数 = 这之前所有出牌/不出（每步一条）
+        assert len(events) == index, f"第 {index} 步的事件条数是 {len(events)}"
+        # 事件里的牌与「各家已出牌」必须对得上
+        dealt: list[int] = []
+        for event in events:
+            assert event["kind"] in ("play", "pass")
+            if event["kind"] == "play":
+                dealt.extend(event["cards"])
+        played = [c for seat in state.played_by_seat for c in seat]
+        assert sorted(dealt) == sorted(played), f"第 {index} 步：事件里的牌与已出牌对不上"
+        # 一条 play 事件必须有牌型，pass 必须没有牌
+        for event in events:
+            if event["kind"] == "play":
+                assert event.get("pattern") and event.get("cards")
+            else:
+                assert not event.get("cards")
+
+
+def test_simulated_state_is_enough_to_build_a_douzero_infoset():
+    """竞技场造的状态要能直接喂给 DouZero 桥接（历史、未见牌、手牌齐备）。"""
+    from ddz.douzero import vendored
+
+    if vendored.load_env() is None:
+        pytest.skip("没有 third_party/DouZero")
+    from ddz.douzero import bridge
+
+    recorded: list = []
+
+    class Recorder(RandomAgent):
+        def act(self, state):
+            recorded.append(state)
+            return super().act(state)
+
+    play([Recorder(seed=1), Recorder(seed=2), Recorder(seed=3)], 6)
+    late = [s for s in recorded if len(s.events) > 8]
+    assert late, "没走到中局"
+    state = late[-1]
+    info = bridge.build_infoset(state, state.seat)
+    assert len(info.card_play_action_seq) == len(state.events)
+    assert info.player_hand_cards
+    assert info.other_hand_cards, "未见牌不该是空的"
+    assert len(info.player_hand_cards) + len(info.other_hand_cards) == 54 - len(state.played_cards)
+    # last_move 的语义与上游一致：最后一条为空就取倒数第二条，所以"要压牌"时才非空
+    if state.leading:
+        assert info.last_move == []
+    else:
+        assert info.last_move, "跟牌时 last_move 必须有牌"
+    assert sum(len(v) for v in info.played_cards.values()) == len(state.played_cards)
+    assert len(info.legal_actions) >= 1

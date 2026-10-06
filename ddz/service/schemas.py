@@ -18,6 +18,10 @@ class HealthResponse(BaseModel):
     torch: bool = False
     cuda: bool = False
     douzero_loaded: bool = False
+    #: 服务实际跑在哪个解释器上。**这个字段是踩过坑才加的**：`python -m ddz.service` 会走
+    #: PATH 里第一个 python（比如 conda），那里可能装了 fastapi、没装 torch——服务照常起来、
+    #: 面板照常出建议，只是 DouZero 永远"未就绪"。一眼看出路径不对，比逐层排查省事得多。
+    python: str = ""
     models: dict[str, str] = Field(default_factory=dict)
     uptime_s: float = 0.0
     records: int = 0

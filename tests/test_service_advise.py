@@ -127,10 +127,18 @@ def test_for_seat_option_over_http(client):
 
 
 def test_agent_option_can_force_the_engine(client):
+    """显式点名 DouZero：装好了就用它，没装好就明确报 no_engine（不静默换引擎）。"""
+    from ddz.douzero.agent import is_ready
+
     body = client.post("/advise", json={
         "session": "t1", "state": my_turn(), "options": {"agent": "douzero:WP"},
     }).json()
-    assert body["ok"] is False and body["reason"] == "no_engine"
+    if is_ready():
+        assert body["ok"] is True
+        assert body["engine"]["name"] == "douzero:WP"
+        assert body["recommended"]["win_prob"] is not None
+    else:
+        assert body["ok"] is False and body["reason"] == "no_engine"
 
 
 def test_config_endpoint_switches_the_engine(client):

@@ -20,11 +20,14 @@ def client(tmp_path) -> TestClient:
         yield test_client
 
 
-def test_health_reports_a_working_service_without_torch(client):
+def test_health_reports_a_working_service(client):
+    """没有 torch 时服务照常跑（douzero_loaded=false），装好了就报 true。"""
+    from ddz.douzero.agent import is_ready
+
     body = client.get("/health").json()
     assert body["ok"] is True
     assert body["records"] == 0
-    assert body["douzero_loaded"] is False
+    assert body["douzero_loaded"] is is_ready()
     assert isinstance(body["torch"], bool)
     assert body["uptime_s"] >= 0
 
@@ -114,3 +117,32 @@ def test_plain_preflight_has_no_pna_header(client):
         headers={"Origin": "https://example.com", "Access-Control-Request-Method": "POST"},
     )
     assert "access-control-allow-private-network" not in response.headers
+
+
+def test_health_cuda_is_truthful(client):
+    """CPU 版 torch 上 ``cuda`` 必须是 false。
+
+    这条是有血的教训：以前这里报的是"torch 装了没有"，于是纯 CPU 的机器（``2.x+cpu``）
+    也报 ``cuda:true``——浮窗页脚和运维都会照着这个撒谎的字段判断。
+    """
+    body = client.get("/health").json()
+    if not body["torch"]:
+        assert body["cuda"] is False
+        return
+    import torch
+
+    assert body["cuda"] is bool(torch.cuda.is_available())
+
+
+def test_health_says_which_python_it_runs_on(client):
+    """服务跑在哪个解释器上必须一眼看得出来。
+
+    ``python -m ddz.service`` 走的是 PATH 里第一个 python：在一个装了 fastapi、没装 torch 的
+    conda 环境里，服务照常起来、面板照常出建议，只有 DouZero 永远"未就绪"（用户实际踩过）。
+    有了这个字段，`/health` 一看路径就知道是不是起错环境了。
+    """
+    import sys
+
+    body = client.get("/health").json()
+    assert body["python"] == sys.executable
+    assert body["python"]

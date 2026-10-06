@@ -2,7 +2,8 @@
 
 - ``heuristic``（别名 ``heur``）——启发式，Phase 2–3 主力；
 - ``random``（别名 ``rand``）——随机基线；
-- ``douzero:WP``／``douzero:<权重目录>``——Phase 4 接入，现在明确报"还没到"而不是静默降级。
+- ``douzero:WP``（或 ``douzero:<权重目录>``）——上游 DouZero。**没装好不算错误**：构造出来的
+  agent ``loaded=False``，每次决策都回落到启发式，并在理由里写明原因（服务的兜底路径不变）。
 """
 
 from __future__ import annotations
@@ -20,7 +21,13 @@ _RANDOM_ALIASES = {"random", "rand", "r"}
 
 
 def available() -> list[str]:
-    return ["heuristic", "random"]
+    """可用引擎。DouZero 装好了就列进去（浮窗/服务的 ``auto`` 都按这个判断）。"""
+    names = ["heuristic", "random"]
+    from ..douzero.agent import is_ready
+
+    if is_ready():
+        names.insert(1, "douzero:WP")
+    return names
 
 
 def make(spec: str, **kwargs: Any) -> Agent:
@@ -35,10 +42,14 @@ def make(spec: str, **kwargs: Any) -> Agent:
     if lowered in _RANDOM_ALIASES:
         return RandomAgent(**kwargs)
     if lowered.startswith("douzero"):
-        raise NotImplementedError(
-            f"DouZero（{spec}）在 Phase 4 接入：需要先 clone third_party/DouZero 并放好 "
-            "baselines/douzero_WP 权重。当前可用：" + "、".join(available())
-        )
+        from ..douzero.agent import DouZeroAgent
+
+        # "douzero" / "douzero:WP" 用默认权重目录；"douzero:<路径>" 指定目录
+        _, _, tail = name.partition(":")
+        weights_path = None if tail in ("", "WP", "wp") else tail
+        agent = DouZeroAgent(weights_path, **kwargs)
+        agent.load()   # 尽力装载；失败也不抛，决策时回落启发式
+        return agent
     raise ValueError(f"不认识的 agent：{spec!r}（可用：{'、'.join(available())}）")
 
 

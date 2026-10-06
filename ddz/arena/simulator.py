@@ -102,6 +102,9 @@ class Simulator:
         self.agents = agents
         self.rng = rng if rng is not None else random.Random(seed)
         self.strict = strict
+        #: 本副牌的动作日志（与平台 log 同形状）。**必须维护**：agent 看到的状态要包含
+        #: 完整历史——DouZero 的观测就是从这串历史里编码出来的，空日志会让它瞎打。
+        self._events: list[dict] = []
 
     # ----------------------------------------------------------------- 一局
 
@@ -133,6 +136,7 @@ class Simulator:
 
             if move is None:
                 table[turn] = TableEntry(turn, "pass")
+                self._events.append({"kind": "pass", "seat": turn})
             else:
                 played[turn].extend(move.cards)
                 hands[turn] = tuple(c for c in hands[turn] if c not in set(move.cards))
@@ -140,6 +144,10 @@ class Simulator:
                     table = [None, None, None]
                 table[turn] = TableEntry(turn, "play", move.cards, move.pattern, "sim")
                 last = table[turn]
+                self._events.append(
+                    {"kind": "play", "seat": turn, "cards": list(move.cards),
+                     "pattern": move.pattern.key()}
+                )
                 plays_per_seat[turn] += 1
                 if is_bomb(move.pattern):
                     outcome.bombs += 1
@@ -164,6 +172,7 @@ class Simulator:
         deck = C.full_deck()
         for deal_index in range(MAX_DEALS):
             self.rng.shuffle(deck)
+            self._events = []
             hands = [tuple(C.sort_cards(deck[17 * i : 17 * i + 17])) for i in SEATS]
             bottom = tuple(C.sort_cards(deck[51:]))
             first_bidder = self.rng.randrange(3)
@@ -199,6 +208,7 @@ class Simulator:
                 return hands, bottom
             # 流局
             outcome.redeals += 1
+            self._events = []
 
         raise RuntimeError("连续流局到上限仍未定地主")  # pragma: no cover
 
@@ -322,7 +332,7 @@ class Simulator:
             players=players,
             table=list(table),
             last=last,
-            events=[],
+            events=[dict(entry) for entry in self._events],
             played_by_seat=[tuple(sorted(c)) for c in played],
             reserve=None,
         )
