@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         斗地主 Copilot
 // @namespace    ddz-copilot
-// @version      0.3.2
+// @version      0.4.2
 // @description  真实对局中实时给出可解释的出牌建议；可选代打（叫分/出牌、续局各自独立开关）
 // @author       you
 // @include      /^https?:\/\/[^/]+\/games\/doudizhu/
@@ -28,10 +28,12 @@
     'use strict';
 
     //: 面板上会显示它——"我到底更新成功没有"要能一眼看出来（必须与头部 @version 一致）
-    const VERSION = '0.3.2';
+    const VERSION = '0.4.2';
     const API = 'http://127.0.0.1:17876';
     const HEALTH_MS = 5000;
     const DEBOUNCE_MS = 150;
+    //: 不变量心跳的间隔（**必须大于 DEBOUNCE_MS**，见启动处那段注释）
+    const HEARTBEAT_MS = 1000;
     //: 建议请求多久没回来就当它挂了。服务端自己 400ms 就会超时回落到启发式，
     //: 所以正常绝不会摸到这个值；它防的是连接被吞掉这种"永远不回来"的情况。
     const ADVISE_TIMEOUT_MS = 4000;
@@ -91,6 +93,7 @@
     let continuedOnce = false;   // 续局只点一次
     let adviseWatchdog = null;   // 在飞请求的看门狗：挂死了要能自己解套
     let adviseToken = 0;         // 回执令牌：只有最新那次请求的收尾算数
+    let missedSchedules = 0;     // 心跳补排了几次（>0 就说明有路径漏排了）
     let pending = null;          // 待执行动作：{version, timer, label}
 
     // ---------------------------------------------------------------- fetch 拦截
@@ -137,6 +140,7 @@
             advice = null;
             ingestedVersion = -1;
             lastError = '';
+            continuedOnce = false;   // 新的一局：续局标记复位（不靠整页跳转也能接着自动续）
         }
         lastVersion = state.version;
         latestState = state;
@@ -167,6 +171,7 @@
     function scheduleAdvise() {
         stopAdvising();
         if (!latestState || latestState.seat === null) return;      // 旁观：不请求
+        if (latestState.phase === 'finished' || gameLooksOver()) return;   // 已经结束了
         if (!myTurn()) return;                                       // 没轮到：显示等待
         if (advice && advice.version === latestState.version) return; // 这个局面已经有建议了
         adviseTimer = setTimeout(requestAdvise, DEBOUNCE_MS);
@@ -183,6 +188,7 @@
 
     function requestAdvise() {
         if (!latestState || !myTurn()) return;
+        if (latestState.phase === 'finished' || gameLooksOver()) return;
         if (advice && advice.version === latestState.version) return;   // 这个局面已经有建议了
         // 有请求在飞：**不能就这么算了**。它回来时会自己再排一次（见 .then 里的 scheduleAdvise），
         // 但要是它挂死了（连接被吞、服务端卡住），就必须靠下面的看门狗解套，
@@ -191,6 +197,7 @@
         const version = latestState.version;
         const token = ++adviseToken;
         adviseInFlight = true;
+        render();          // 立刻把"正在算…"显示出来：此刻确实有一个请求在飞
         adviseWatchdog = setTimeout(() => {
             if (token !== adviseToken) return;
             finishAdvise(token);
@@ -391,6 +398,8 @@
         if (!host) return;
         const state = latestState;
         const data = advice && state && advice.version === state.version ? advice : null;
+        // 终局可能有两副面孔：state 说结束了，或者页面已经把结算画面摆出来了
+        const over = !!state && (state.phase === 'finished' || gameLooksOver());
 
         // 横幅
         let banner = '等待牌局…';
@@ -401,7 +410,7 @@
         } else if (!state) {
             banner = '等待牌局…';
         } else if (state) {
-            if (state.phase === 'finished') {
+            if (over) {
                 banner = '本局已结束';
             } else if (state.seat === null) {
                 banner = '旁观中';
@@ -415,7 +424,7 @@
             }
         }
         ui.banner.textContent = banner;
-        ui.banner.className = 'banner ' + (kind || (state && !myTurn() ? 'muted' : ''));
+        ui.banner.className = 'banner ' + (kind || (state && !over && !myTurn() ? 'muted' : ''));
 
         // 折叠时的建议条：收起来了，建议也得看得见
         ui.mini.replaceChildren();
@@ -430,6 +439,8 @@
                 }
                 ui.mini.append(cards, el('span', 'desc', data.recommended.description || ''));
             }
+        } else if (config.collapsed && data && data.ok && data.solver && data.solver.used) {
+            ui.mini.append(el('span', 'desc', '残局求解 · 必胜'));
         } else if (config.collapsed && data && data.reason === 'no_engine') {
             ui.mini.append(el('span', 'note', 'DouZero 未就绪，点开切回启发式'));
         }
@@ -444,6 +455,8 @@
                 ui.body.append(biddingBlock(data.bidding));
             } else if (data.recommended) {
                 ui.body.append(recommendBlock(data.recommended));
+                const verdict = solverVerdict(data.solver);
+                if (verdict) ui.body.append(verdict);
                 if (data.alternatives && data.alternatives.length) {
                     ui.body.append(alternativesBlock(data.alternatives));
                 }
@@ -454,6 +467,9 @@
             ui.body.append(note);
         } else if (data && data.reason && data.reason !== 'not_my_turn') {
             ui.body.append(el('div', 'note', data.message || data.reason));
+        } else if (over) {
+            // 结算画面：这里绝不能再写"正在计算"
+            ui.body.append(el('div', 'note', config.autoContinue ? '本局已结束，准备续局…' : '本局已结束'));
         } else if (!data && myTurn() && serviceOk !== false) {
             ui.body.append(el('div', 'note', adviseInFlight ? '正在计算…' : '准备建议…'));
         }
@@ -468,6 +484,9 @@
         }
         if (counterSource && counterSource.hand_analysis) {
             ui.body.append(handBlock(counterSource.hand_analysis));
+        }
+        if (counterSource && counterSource.disagreement) {
+            ui.body.append(disagreementBlock(counterSource.disagreement));
         }
 
         // 总开关 + 状态行
@@ -488,7 +507,7 @@
         } else if (lastError) {
             ui.status.textContent = `⚠ ${lastError}`;
             ui.status.className = 'status';
-        } else if (state && state.phase === 'finished') {
+        } else if (over) {
             ui.status.textContent = !config.autoContinue
                 ? '本局已结束（续局已关）'
                 : (continuedOnce ? '已点续局' : '准备续局…');
@@ -506,8 +525,14 @@
         const engine = counterSource && counterSource.engine ? counterSource.engine : null;
         const timing = counterSource && counterSource.timing_ms ? counterSource.timing_ms.total : null;
         const stale = state && advice && advice.version !== state.version;
+        const solvedBySolver = counterSource && counterSource.solver && counterSource.solver.used;
+        // 拿不到引擎名 ≠ 服务断了。没有引擎名（还没算过、或这份响应里没人出建议）时就写
+        // "会话配的是哪个引擎"；只有探活失败才写"未连接"——和横幅"服务未启动"同口径。
+        const configured = config.engine === 'douzero' ? 'douzero:WP' : 'heuristic';
         const parts = [
-            engine && engine.name ? engine.name : '未连接',
+            solvedBySolver ? '残局求解'
+                : (engine && engine.name ? engine.name
+                    : (serviceOk === false ? '未连接' : configured)),
             engine && engine.device ? engine.device : '',
             timing !== null && timing !== undefined ? `${Math.round(timing)}ms` : '',
             stale ? '建议已过期' : '',
@@ -570,6 +595,29 @@
             rec.rationale.forEach((text) => list.append(el('li', '', text)));
             box.append(list);
         }
+        return box;
+    }
+
+    /** 残局求解的结论：**证明过**的必胜/必败，和"估计"不是一回事，所以单独一行。 */
+    function solverVerdict(solver) {
+        if (!solver || !solver.proved) return null;
+        const box = el('div', 'block verdict');
+        if (solver.winning) {
+            box.append(el('div', 'verdict-line win',
+                `残局求解：这一手必胜（搜了 ${solver.nodes} 个局面，${Math.round(solver.ms)}ms）`));
+        } else {
+            box.append(el('div', 'verdict-line lose',
+                '残局求解：本局已必败——对方不出错就赢不了，尽力争取他失误'));
+        }
+        return box;
+    }
+
+    /** 策略分歧：两个引擎首选不一致，把两边都摆出来让人自己判断。 */
+    function disagreementBlock(info) {
+        const box = el('div', 'block disagree');
+        box.append(el('div', 'label', '策略分歧'));
+        box.append(el('div', 'note', `DouZero：${info.engine.description}`));
+        box.append(el('div', 'note', `启发式：${info.heuristic.description}`));
         return box;
     }
 
@@ -777,22 +825,45 @@
         return true;
     }
 
-    /** 终局后自动进入下一局 / 下一场（按按钮文本找，和参考脚本同一套约定）。 */
-    function autoContinue() {
-        if (!config.autoContinue || continuedOnce) return;
-        const isContinue = (text) =>
-            (text.indexOf('→') !== -1 || text.indexOf('再来一局') !== -1
-                || text.indexOf('再来一场比赛') !== -1) && text.indexOf('发送') === -1;
+    /** 是不是"续局"按钮（和参考脚本同一套文本约定）。 */
+    function isContinueText(text) {
+        return (text.indexOf('→') !== -1 || text.indexOf('再来一局') !== -1
+            || text.indexOf('再来一场比赛') !== -1) && text.indexOf('发送') === -1;
+    }
+
+    function continueButton() {
         const boxes = [document.getElementById('ddz-result'), document.getElementById('ddz-actions')];
         for (const box of boxes) {
             if (!box) continue;
-            const button = Array.from(box.querySelectorAll('button'))
-                .find((b) => !b.disabled && isContinue(b.textContent.trim()));
-            if (button) {
-                continuedOnce = true;
-                button.click();
-                return;
-            }
+            const button = Array.from(box.querySelectorAll('button')).find((b) => {
+                // **必须真的可见**：平台可能把「再来一局」一直留在 DOM 里（游戏中隐藏着），
+                // 只看 disabled 的话，面板会全程以为这局已经打完了。
+                if (b.disabled || b.hidden) return false;
+                const style = window.getComputedStyle(b);
+                if (style.display === 'none' || style.visibility === 'hidden') return false;
+                return isContinueText(b.textContent.trim());
+            });
+            if (button) return button;
+        }
+        return null;
+    }
+
+    /** 页面自己已经说了"这局结束了"：结算弹窗里出现了「再来一局」。
+     *
+     *  **不能只信 state.phase**——平台在结算时可能就不再推终局 state 了，那样面板会一直停在
+     *  最后一帧"轮到我"的老局面上，向一个永远不会来的建议反复发请求（用户看到的就是
+     *  "自动 · 正在算"卡在结算画面，而且自动续局也不点）。DOM 是这里唯一可靠的事实来源。 */
+    function gameLooksOver() {
+        return !!continueButton();
+    }
+
+    /** 终局后自动进入下一局 / 下一场。 */
+    function autoContinue() {
+        if (!config.autoContinue || continuedOnce) return;
+        const button = continueButton();
+        if (button) {
+            continuedOnce = true;
+            button.click();
         }
     }
 
@@ -862,6 +933,28 @@
         setInterval(() => {
             if (serviceOk !== true || !latestState) probeHealth();
         }, HEALTH_MS);
+        // 不变量心跳：**只要"轮到我、这个局面还没有建议"，就必须有请求在飞或在排队**。
+        // 光靠"状态来了就排一次、响应回来再排一次"是不够的——任何一条路径漏排，面板就会
+        // 永远停在"正在算…/等待建议…"上（用户真踩到了）。这一跳把漏排兜住：scheduleAdvise
+        // 自己会把"已经有建议 / 没轮到我 / 旁观"短路掉，所以正常情况它是空转。
+        // 间隔必须**大于**防抖时间，否则会一次次把定时器重置掉、请求永远发不出去。
+        setInterval(() => {
+            if (!latestState) return;
+            // 结算画面出来了但平台没推终局 state：该续局就续局，别干等
+            if (config.autoContinue && !continuedOnce && gameLooksOver()) {
+                scheduleContinue();
+                return;
+            }
+            if (!myTurn()) return;
+            if (latestState.phase === 'finished' || gameLooksOver()) return;
+            if (advice && advice.version === latestState.version) return;
+            if (adviseInFlight) return;
+            // 走到这儿 = 有人漏排了。补上，并在控制台留一笔——真再出现"卡住"，
+            // 打开 F12 看有没有这行就知道是不是这条路径。
+            missedSchedules += 1;
+            console.warn(`[ddz-copilot] 漏排的建议请求，已自动补上（第 ${missedSchedules} 次）`);
+            scheduleAdvise();
+        }, HEARTBEAT_MS);
     }
 
     const STYLES = `
@@ -898,6 +991,10 @@
             .mini .card-img { height: 30px; }
             .mini .desc { margin-top: 0; font-size: 12px; }
             .mini .note { font-size: 11px; }
+            .verdict-line { font-size: 12px; padding: 3px 6px; border-radius: 4px; }
+            .verdict-line.win { background: rgba(56,142,60,.3); color: #d7ffd9; font-weight: 600; }
+            .verdict-line.lose { background: rgba(198,40,40,.28); color: #ffe1e1; font-weight: 600; }
+            .disagree .note { color: #ffcc80; }
             .body { padding: 8px 10px 4px; display: flex; flex-direction: column; gap: 8px; max-height: 60vh; overflow-y: auto; }
             .block { border-top: 1px solid rgba(255,255,255,.08); padding-top: 7px; }
             .block:first-child { border-top: 0; padding-top: 0; }

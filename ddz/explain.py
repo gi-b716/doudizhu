@@ -196,6 +196,22 @@ def reason_rlcard_random() -> str:
     return "RLCard 规则基线：没有同型能压，它在合法着法里随机抓了一手"
 
 
+def reason_solver_win(label: str, nodes: int) -> str:
+    return f"残局求解：这一手必胜（{label}）——双方都最优也赢，搜了 {nodes} 个局面"
+
+
+def reason_solver_pass() -> str:
+    return "残局求解：这一手不出反而必胜——让对方先走，牌权还留在自家"
+
+
+def reason_solver_lost() -> str:
+    return "残局求解：这个局面已经必败（对方最优应对下赢不了），只能尽量争取他失误"
+
+
+def reason_disagree(cards_text: str) -> str:
+    return f"策略分歧：启发式想打 {cards_text}"
+
+
 def reason_quiet() -> str:
     return "这一手不拆结构、不动大牌，按拆解走最省"
 

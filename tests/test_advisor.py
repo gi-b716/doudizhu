@@ -557,3 +557,134 @@ def test_weights_that_arrive_later_are_picked_up_without_a_restart(tmp_path, mon
     assert late["engine"]["device"] == "cpu"
     assert advisor.available_engines() == ["heuristic", "douzero:WP"]
     assert advisor.resolve_auto() == "douzero:WP"
+
+
+# --------------------------------------------------------------------- 残局求解（Phase 5）
+
+
+def endgame_payload(*args, **kwargs):
+    from helpers import platform_endgame
+
+    return platform_endgame(*args, **kwargs)
+
+
+def test_endgame_solver_takes_over_when_it_can_prove_a_win(advisor):
+    """残局且算得出必胜：建议由求解器给出，而且那一手**必须真的赢**（暴力枚举复核）。"""
+    from ddz.cards import parse_cards
+    from ddz.patterns import Pattern
+    from test_endgame import brute_after
+    from ddz.state import from_platform_state
+
+    state = endgame_payload(
+        ["小王 大王", "3", "8 7"], turn=0, landlord=2,
+        to_beat=Pattern("single", 5), play_cards=parse_cards("8"),
+    )
+    result = advisor.advise("s1", state)
+    assert result["ok"] is True
+    assert result["recommended"]["source"] == "solver"
+    assert result["solver"] == {
+        "used": True, "winning": True, "proved": True,
+        "nodes": result["solver"]["nodes"], "ms": result["solver"]["ms"],
+    }
+    assert "必胜" in result["recommended"]["rationale"][0]
+    assert "solver" in result["engine"]["tags"]
+
+    view = from_platform_state(state)
+    move = None
+    if result["recommended"]["cards"]:
+        from ddz.moves import Move
+        move = Move(tuple(result["recommended"]["cards"]),
+                    Pattern.parse_key(result["recommended"]["pattern_key"]))
+    assert brute_after(view, move), "求解器推荐的着法其实赢不了"
+
+
+def test_endgame_solver_lists_the_other_winning_moves_as_alternatives(advisor):
+    from ddz.cards import parse_cards
+    from ddz.patterns import Pattern
+
+    state = endgame_payload(
+        ["小王 大王", "3", "8 7"], turn=0, landlord=2,
+        to_beat=Pattern("single", 5), play_cards=parse_cards("8"),
+    )
+    result = advisor.advise("s2", state)
+    labels = {alt["description"] for alt in result["alternatives"]}
+    assert any("大王" in label or "王炸" in label for label in labels), labels
+
+
+def test_endgame_solver_marks_a_lost_position_but_still_gives_a_move(advisor):
+    """算出来必败时：着法照给（尽量打），但结论要说实话——这正是这个功能最有用的时刻。"""
+    from ddz.patterns import Pattern
+
+    state = endgame_payload(
+        ["4 5", "3", "6"], turn=0, landlord=2,
+        to_beat=Pattern("single", 4), play_cards=[46],   # 地主打的 7（不在他手里，纯当桌面）
+    )
+    result = advisor.advise("s3", state)
+    assert result["ok"] is True
+    assert result["solver"]["winning"] is False
+    assert result["solver"]["used"] is False          # 没接管，只是给了结论
+    assert result["recommended"]["source"] != "solver"
+    assert result["recommended"]["win_prob"] == 0.0
+    assert "必败" in result["recommended"]["rationale"][0]
+    assert "solver:lost" in result["engine"]["tags"]
+
+
+def test_endgame_solver_is_silent_when_hands_are_hidden(advisor):
+    """看不到别家的牌就不是完美信息，求解器**必须闭嘴**（不许拿半个信息硬算）。"""
+    from ddz.cards import parse_cards
+    from ddz.patterns import Pattern
+
+    hidden = endgame_payload(
+        ["4 5", "3", "6"], turn=0, landlord=2,
+        to_beat=Pattern("single", 4), play_cards=parse_cards("7"),
+    )
+    hidden.pop("hands")          # 平台哪天不发了，就是这种情况
+    result = advisor.advise("s4", hidden)
+    assert result["ok"] is True
+    assert result["solver"] is None
+    assert result["recommended"]["source"] != "solver"
+
+
+def test_disagreement_is_reported_when_the_engines_differ(advisor):
+    """策略分歧：两个引擎首选不一致时要把两边都摆出来，让人自己判断。"""
+    from ddz.engine.base import Candidate
+    from ddz.moves import Move
+    from ddz.patterns import Pattern
+
+    class PickyEngine(StubEngine):
+        def act(self, state):
+            from ddz.moves import legal_moves
+
+            moves = legal_moves(state.advise_hand, state.to_beat, canonical=True)
+            return Candidate(moves[-1], 0.9, ["替身挑最大的"], ["stub"], self.name)
+
+    advisor.register("douzero:WP", PickyEngine())
+    result = advisor.advise("s5", my_turn_state(), AdviseOptions(agent="douzero:WP", top_k=3))
+    assert result["ok"] is True
+    block = result["disagreement"]
+    assert block is not None, "两个引擎的首选明显不同，应该报出来"
+    assert block["engine"]["description"] and block["heuristic"]["description"]
+    assert block["text"].startswith("策略分歧")
+
+    # 两边一致时不该报
+    advisor.register("douzero:WP", StubEngine())
+    same = advisor.advise("s6", my_turn_state(), AdviseOptions(agent="douzero:WP"))
+    assert same["engine"]["name"] == "douzero:WP"
+
+
+def test_idle_responses_still_name_the_engine(advisor):
+    """没轮到我们 / 旁观时也要报出"会话在用哪个引擎"。
+
+    不然浮窗页脚没有引擎名可写，只能显示「未连接」——看起来像服务断了，可服务好好的，
+    只是这一份响应里没人出建议而已（用户真这么问过）。
+    """
+    idle = advisor.advise("t1", not_my_turn_state())
+    assert idle["ok"] is False and idle["reason"] == "not_my_turn"
+    assert idle["engine"]["name"] == "heuristic"
+
+    forced = advisor.advise("t2", not_my_turn_state(), AdviseOptions(agent="douzero:WP"))
+    assert forced["engine"]["name"] == "douzero:WP"
+
+    finished = advisor.advise("t3", states()[-1])
+    assert finished["reason"] == "finished"
+    assert finished["engine"]["name"] == "heuristic"

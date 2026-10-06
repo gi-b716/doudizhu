@@ -353,3 +353,71 @@ def test_userscript_continue_is_its_own_switch():
     assert "if (config.autoContinue) scheduleContinue();" in source
     # 代打那两处守卫仍然只看 auto（别把出牌也放开了）
     assert "function autoAct(data) {\n        if (!config.auto) return;" in source
+
+
+def test_userscript_shows_the_solver_verdict():
+    """残局求解的结论要单独显眼地标出来——"证明过的必胜"和"估计 63%"不是一回事。"""
+    source = USERSCRIPT.read_text(encoding="utf-8")
+    assert "残局求解：这一手必胜" in source
+    assert "残局求解：本局已必败" in source
+    assert "solverVerdict" in source and "solver.proved" in source
+    assert ".verdict-line.win" in source and ".verdict-line.lose" in source
+
+
+def test_userscript_shows_engine_disagreement():
+    """策略分歧：两个引擎首选不一致时，两边都要摆出来。"""
+    source = USERSCRIPT.read_text(encoding="utf-8")
+    assert "disagreementBlock" in source
+    assert "'策略分歧'" in source
+    assert "counterSource.disagreement" in source
+
+
+def test_userscript_has_a_scheduling_invariant_heartbeat():
+    """不变量：**轮到我 + 还没建议 ⇒ 必须有请求在飞或在排队**。
+
+    这条以前只靠"状态来了排一次、响应回来再排一次"维持，任何一条路径漏排，面板就永远停在
+    「正在算…/等待建议…」上（用户前后踩到两次）。心跳是兜底：发现违反就补排并留痕。
+    """
+    source = USERSCRIPT.read_text(encoding="utf-8")
+    assert "HEARTBEAT_MS" in source
+    assert "setInterval(() => {" in source and "missedSchedules" in source
+    # 心跳间隔必须大于防抖，否则会把定时器一次次重置、请求永远发不出去
+    import re
+
+    heartbeat = int(re.search(r"const HEARTBEAT_MS = (\d+);", source).group(1))
+    debounce = int(re.search(r"const DEBOUNCE_MS = (\d+);", source).group(1))
+    assert heartbeat > debounce, "心跳比防抖还密，会把请求饿死"
+    # 真发出请求的那一刻要立刻重画，"正在算…"必须跟事实同步
+    assert "render();          // 立刻把" in source
+
+
+def test_userscript_trusts_the_result_screen_not_only_the_state():
+    """结算画面出现就当本局结束——**不能只信 state.phase**。
+
+    平台在结算时可能就不再推终局 state 了。那样面板会一直停在最后一帧"轮到我"的老局面上，
+    向一个永远不会来的建议反复发请求：用户看到的就是「自动 · 正在算」卡在结算画面，
+    而且自动续局也不会点（续局以前只挂在"收到终局 state"上）。
+    """
+    source = USERSCRIPT.read_text(encoding="utf-8")
+    assert "function gameLooksOver()" in source
+    assert "state.phase === 'finished' || gameLooksOver()" in source
+    # 结束之后不许再要建议
+    assert "if (latestState.phase === 'finished' || gameLooksOver()) return;" in source
+    # 终局 state 没来也要能续局：心跳里兜住
+    assert "if (config.autoContinue && !continuedOnce && gameLooksOver())" in source
+    # 按钮必须真的可见，否则"一直留在 DOM 里的隐藏按钮"会让面板全程以为打完了
+    assert "if (b.disabled || b.hidden) return false;" in source
+    assert "style.visibility === 'hidden'" in source
+    # 换局时续局标记要复位（没有整页跳转时全靠它）
+    assert "continuedOnce = false;   // 新的一局" in source
+
+
+def test_userscript_footer_distinguishes_idle_from_disconnected():
+    """页脚的「未连接」只能表示"服务不在"，不能表示"这条建议没有引擎"。
+
+    以前只要拿不到引擎名就写「未连接」，于是没轮到我们时页脚一直挂着这三个字，
+    看着像断了（用户真这么问过）。现在：没引擎名就写会话配的那个引擎，探活失败才写未连接。
+    """
+    source = USERSCRIPT.read_text(encoding="utf-8")
+    assert "serviceOk === false ? '未连接' : configured" in source
+    assert "const configured = config.engine === 'douzero' ? 'douzero:WP' : 'heuristic';" in source

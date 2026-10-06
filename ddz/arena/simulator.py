@@ -96,12 +96,17 @@ class Simulator:
         seed: int | None = None,
         rng: random.Random | None = None,
         strict: bool = True,
+        oracle: bool = False,
     ) -> None:
         if len(agents) != 3:
             raise ValueError("需要正好三名 agent")
         self.agents = agents
         self.rng = rng if rng is not None else random.Random(seed)
         self.strict = strict
+        #: 把三家手牌也发给 agent。**默认关**——真实平台确实会下发 ``hands``（所以服务端的
+        #: 残局求解是真能用上的），但竞技场里给所有 agent 开天眼，测出来的强度就没意义了。
+        #: 只有评测"残局求解到底值多少"这种问题时才打开，而且要在报告里写明。
+        self.oracle = oracle
         #: 本副牌的动作日志（与平台 log 同形状）。**必须维护**：agent 看到的状态要包含
         #: 完整历史——DouZero 的观测就是从这串历史里编码出来的，空日志会让它瞎打。
         self._events: list[dict] = []
@@ -322,7 +327,7 @@ class Simulator:
             turn=turn,
             leading=leading,
             hand=tuple(hands[seat]),
-            all_hands=None,
+            all_hands=[tuple(h) for h in hands] if self.oracle else None,
             bottom=bottom if playing else None,
             landlord=landlord,
             high_bid=high_bid or base,

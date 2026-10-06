@@ -40,6 +40,7 @@ def run_match(
     strict: bool = True,
     progress: bool = False,
     agent_kwargs: dict | None = None,
+    oracle: bool = False,
 ) -> tuple[Metrics, float]:
     """跑 ``games`` 局，返回 (指标, 用时秒)。"""
     metrics = Metrics(list(players))
@@ -51,7 +52,7 @@ def run_match(
         agents = [
             make(name, **({} if agent_kwargs is None else agent_kwargs.get(name, {}))) for name in order
         ]
-        outcome = Simulator(agents, seed=seed + index, strict=strict).play(index)
+        outcome = Simulator(agents, seed=seed + index, strict=strict, oracle=oracle).play(index)
         metrics.add(outcome)
         if progress and (index + 1) % max(1, games // 10) == 0:
             print(f"  ... {index + 1}/{games}", file=sys.stderr)
@@ -92,6 +93,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--out", default=None, help="输出目录（默认 runs/<players>_<seed>）")
     parser.add_argument("--dump", action="store_true", help="summary.json 里带上每一局的明细")
     parser.add_argument("--lenient", action="store_true", help="非法着法只计数不抛异常")
+    parser.add_argument(
+        "--oracle", action="store_true",
+        help="把三家手牌也发给 agent（只有残局求解这类需要完美信息的东西用得上；"
+             "启发式/随机/DouZero 都不读它，所以对它们是中性的）。报告里必须写明用了它。",
+    )
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args(argv)
 
@@ -107,6 +113,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         rotate=args.rotate,
         strict=not args.lenient,
         progress=not args.quiet,
+        oracle=args.oracle,
     )
     summary = metrics.summary(
         meta={

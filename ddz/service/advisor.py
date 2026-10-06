@@ -32,6 +32,14 @@ from typing import Any, Mapping
 from .. import __version__
 from ..agents.registry import make
 from ..counter import counter_snapshot, threats
+from ..engine.base import Candidate
+from ..engine.endgame import (
+    SolveResult, candidate_from as solver_candidate, solve as endgame_solve,
+    solvable as endgame_solvable,
+)
+from ..explain import (
+    describe_move, reason_disagree, reason_solver_lost, reason_solver_pass, reason_solver_win,
+)
 from ..data.archive import Archive
 from ..engine.base import Agent, Candidate
 from ..engine.heuristic import analyze_hand
@@ -276,7 +284,7 @@ class Advisor:
 
         seat = options.for_seat if options.for_seat is not None else state.advise_seat
         view = state if seat is None or seat == state.seat else state.for_seat(seat)
-        base = self._base_payload(view, seat, parse_ms)
+        base = self._base_payload(view, seat, parse_ms, options)
 
         if seat is None:
             return {**base, "ok": False, "reason": "spectator", "message": "旁观且拿不到手牌，无法建议"}
@@ -306,18 +314,31 @@ class Advisor:
         deadline = max(0.05, (options.deadline_ms or self.default_deadline_ms) / 1000.0)
         agent_ms = 0.0
         fallback = False
-        future: Future = self._executor.submit(agent.act, view)
-        try:
-            candidate = future.result(timeout=deadline)
-        except FutureTimeout:
-            future.cancel()
-            fallback = True
-            candidate = self._fallback_agent().act(view)
-        except Exception as exc:  # 引擎炸了也不能让浮窗空着
-            fallback = True
-            candidate = self._fallback_agent().act(view)
-            candidate.reasons = [f"引擎出错，已回退启发式（{exc}）", *candidate.reasons]
-        agent_ms = (time.perf_counter() - started) * 1000.0 - parse_ms
+        solved, solve_ms = self._solve_endgame(view)
+        if solved is not None and solved.winning:
+            # 残局且算得出**必胜**：直接用求解器的着法，不必再问模型——
+            # 完美信息下搜到底的结论，比任何估值都硬。
+            candidate = solver_candidate(solved)
+            agent_ms = solve_ms
+        else:
+            future: Future = self._executor.submit(agent.act, view)
+            try:
+                candidate = future.result(timeout=deadline)
+            except FutureTimeout:
+                future.cancel()
+                fallback = True
+                candidate = self._fallback_agent().act(view)
+            except Exception as exc:  # 引擎炸了也不能让浮窗空着
+                fallback = True
+                candidate = self._fallback_agent().act(view)
+                candidate.reasons = [f"引擎出错，已回退启发式（{exc}）", *candidate.reasons]
+            agent_ms = (time.perf_counter() - started) * 1000.0 - parse_ms
+            if solved is not None and solved.winning is False:
+                # 算出来是**必败**：着法照旧（尽量打），但结论要说实话——
+                # 这是这个功能最有用的时刻：玩家知道自己怎么走都赢不了，可以改为等对方失误。
+                candidate.win_prob = 0.0
+                candidate.reasons = [reason_solver_lost(), *candidate.reasons]
+                candidate.tags = [*candidate.tags, "solver:lost"]
 
         result = {
             **base,
@@ -328,6 +349,8 @@ class Advisor:
                 **self._engine_info(agent, name, fallback=fallback),
                 "tags": list(candidate.tags),
             },
+            "solver": _solver_payload(solved, solve_ms),
+            "disagreement": self._disagreement(view, name, candidate),
             "timing_ms": {
                 **base["timing_ms"],
                 "agent": round(agent_ms, 3),
@@ -337,6 +360,38 @@ class Advisor:
         }
         session.remember(cache_key, result)
         return result
+
+    def _solve_endgame(self, view: GameState) -> tuple[SolveResult | None, float]:
+        """残局能算就算。看不到三家手牌、或牌还太多，就返回 ``None``（不猜）。"""
+        if not endgame_solvable(view):
+            return None, 0.0
+        started = time.perf_counter()
+        result = endgame_solve(view)
+        return result, (time.perf_counter() - started) * 1000.0
+
+    def _disagreement(self, view: GameState, name: str, candidate: Candidate) -> dict | None:
+        """**策略分歧**（PLAN §3.4）：选了 DouZero 时，让启发式也看一眼，首选不一致就摆出来。
+
+        两个引擎给出的着法不同，不等于有一个是错的——但值得让人看见，好自己判断。
+        求解器已经算过（proved）的着法不参与比较：那个是结论，不是意见。
+        """
+        if not name.startswith("douzero") or "solver" in candidate.tags:
+            return None
+        try:
+            other = self.agent_for("heuristic")[0]
+            theirs = other.act(view)
+        except Exception:  # 对照物出问题不影响主引擎的建议
+            return None
+        mine, other_move = candidate.move, theirs.move
+        if mine is not None and other_move is not None and mine.pattern.key() == other_move.pattern.key():
+            return None
+        if mine is None and other_move is None:
+            return None
+        return {
+            "engine": {"cards": list(candidate.cards), "description": describe_move(candidate.move)},
+            "heuristic": {"cards": list(theirs.cards), "description": describe_move(other_move)},
+            "text": reason_disagree(describe_move(other_move)),
+        }
 
     # ----------------------------------------------------------------- 叫分与归档
 
@@ -412,7 +467,18 @@ class Advisor:
 
     # ----------------------------------------------------------------- 组装
 
-    def _base_payload(self, view: GameState, seat: int | None, parse_ms: float) -> dict:
+    def _display_engine(self, options: AdviseOptions) -> str:
+        """没轮到我们、也不打算算建议时，页脚该写哪个引擎。
+
+        **不能不写**：浮窗页脚拿不到引擎名就显示"未连接"，看起来像服务断了——可服务好好的，
+        只是这一份响应里没人出建议而已（用户真这么问过）。写上"这台会话在用哪个引擎"才是实话。
+        """
+        wanted = (options.agent or "auto").strip() or "auto"
+        return self.resolve_auto() if wanted == "auto" else wanted
+
+    def _base_payload(
+        self, view: GameState, seat: int | None, parse_ms: float, options: AdviseOptions
+    ) -> dict:
         hand = view.hand_for(seat) if seat is not None else None
         return {
             "ok": False,  # 由调用方按情况改成 True
@@ -432,7 +498,9 @@ class Advisor:
             "bidding": None,
             "recommended": None,
             "alternatives": [],
-            "engine": {"name": None, "device": None, "fallback": False},
+            "engine": {
+                "name": self._display_engine(options), "device": None, "fallback": False,
+            },
             "timing_ms": {"parse": round(parse_ms, 3), "total": round(parse_ms, 3)},
         }
 
@@ -498,3 +566,16 @@ class Advisor:
             "records": records,
             "uptime_s": round(time.time() - self.started_at, 3),
         }
+
+
+def _solver_payload(result: SolveResult | None, elapsed_ms: float) -> dict | None:
+    """响应里的 ``solver`` 块：用没用上、结论是什么、花了多少。"""
+    if result is None:
+        return None
+    return {
+        "used": bool(result.proved and result.winning),
+        "winning": result.winning,
+        "proved": result.proved,
+        "nodes": result.nodes,
+        "ms": round(elapsed_ms, 3),
+    }

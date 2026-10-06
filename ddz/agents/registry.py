@@ -6,6 +6,8 @@
   agent ``loaded=False``，每次决策都回落到启发式，并在理由里写明原因（服务的兜底路径不变）。
 - ``rlcard-rule``——上游 DouZero 仓库里那个 RLCard 规则基线（**别人的启发式**），只为竞技场
   的第三方参照存在，**不进** :func:`available`（那是产品的引擎列表，只有启发式与 DouZero）。
+- ``endgame``（别名 ``solver``）——残局求解 + 启发式兜底；看得见三家手牌时才算（见
+  :mod:`ddz.agents.endgame_agent`）。服务端不靠它——服务是把求解器套在**你选的引擎**外面。
 """
 
 from __future__ import annotations
@@ -43,6 +45,10 @@ def make(spec: str, **kwargs: Any) -> Agent:
         return HeuristicAgent(weights, **kwargs)
     if lowered in _RANDOM_ALIASES:
         return RandomAgent(**kwargs)
+    if lowered in ("endgame", "solver", "end"):
+        from .endgame_agent import EndgameAgent
+
+        return EndgameAgent(**kwargs)
     if lowered in ("rlcard-rule", "rlcard", "rlcard_rule"):
         from .rlcard_rule import RLCardRuleAgent
 

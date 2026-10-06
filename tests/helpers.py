@@ -177,3 +177,45 @@ class ScriptedAgent:
             return Bid(0, 0.0, ["剧本用完了"])
         step = self.bids.pop(0)
         return Bid(step if isinstance(step, int) else step(state), 0.0, ["剧本"])
+
+
+def platform_endgame(hands, *, turn=0, landlord=1, to_beat=None, last_seat=None,
+                     play_cards=(), version=7):
+    """手搓一个**平台格式**的残局 state（照抄 :func:`from_platform_state` 要吃的字段）。
+
+    和 :func:`game_state` 的区别：这个带三家 ``hands``（真实平台就是这么下发的），
+    所以服务层能拿它走"完美信息残局求解"那条路。
+    """
+    board = [sorted(cards_of(h) if isinstance(h, str) else list(h)) for h in hands]
+    log = []
+    last = None
+    if to_beat is not None:
+        who = last_seat if last_seat is not None else (turn + 2) % 3
+        if (who + 1) % 3 != turn:
+            raise ValueError(f"局面自相矛盾：{who} 号刚出牌，下一个却轮到 {turn} 号")
+        played = sorted(play_cards)
+        if not played:
+            raise ValueError("平台格式的 last 必须带 cards，否则解析不出来")
+        board[who] = [c for c in board[who] if c not in set(played)]
+        log = [{"kind": "play", "seat": who, "cards": played}]
+        last = {"seat": who, "pattern": to_beat.platform_key(), "cards": played}
+    return {
+        "version": version,
+        "seat": turn,
+        "phase": "playing",
+        "turn": turn,
+        "leading": to_beat is None,
+        "hand": list(board[turn]),
+        "hands": [list(h) for h in board],
+        "landlord": landlord,
+        "players": [
+            {
+                "username": f"p{i}",
+                "count": len(board[i]),
+                "role": "landlord" if i == landlord else "farmer",
+            }
+            for i in range(3)
+        ],
+        "log": log,
+        "last": last,
+    }
