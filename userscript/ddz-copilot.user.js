@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         斗地主 Copilot
 // @namespace    ddz-copilot
-// @version      0.3.0
-// @description  真实对局中实时给出可解释的出牌建议（只建议，不代打、不自动提交）
+// @version      0.3.2
+// @description  真实对局中实时给出可解释的出牌建议；可选代打（叫分/出牌、续局各自独立开关）
 // @author       you
 // @include      /^https?:\/\/[^/]+\/games\/doudizhu/
 // @run-at       document-start
@@ -11,21 +11,30 @@
 // ==/UserScript==
 
 /*
- * 设计约束（都来自 PLAN §3.6，改动前先读一遍）：
+ * 设计约束（改动前先读一遍）：
  *
  * 1. 页面状态在 IIFE 闭包里，外面拿不到 → 唯一的信息来源是拦截 window.fetch。
  *    **绝不改写请求或响应**：只是 clone 一份自己看。另外兜底读 #ddz-initial。
- * 2. 只建议：不点「出牌」、不发 play/pass/bid、不改轮询频率。「帮我选中」默认关闭，
- *    它只帮你在手牌上做出选择，点不点出牌永远是你自己的事。
- * 3. 服务没起或解析失败时，面板要显示「服务未启动 / 建议暂不可用」，不能静默什么都不显示。
+ * 2. **代打是后来加的，PLAN §3.6 里"只建议、绝不点出牌"那句已经被用户明确推翻**，
+ *    别再照那句改回去。现在的底线是：代打只**驱动页面自己的按钮**，绝不自己构造
+ *    play/pass/bid 打给游戏接口、不改轮询频率、不碰任何协议。四条护栏见「自动执行」那一段。
+ *    （两个开关：`auto` 管叫分+出牌，`autoContinue` 管续局，互不影响。）
+ * 3. 「帮我选中」是手动版：只替你在手牌上做选择，点不点出牌由你决定。
+ * 4. 服务没起或解析失败时，面板要显示「服务未启动 / 建议暂不可用」，不能静默什么都不显示。
+ *    但**别在没在算的时候说"正在算"**——状态行的每种说法都必须对应真实状态。
  */
 
 (() => {
     'use strict';
 
+    //: 面板上会显示它——"我到底更新成功没有"要能一眼看出来（必须与头部 @version 一致）
+    const VERSION = '0.3.2';
     const API = 'http://127.0.0.1:17876';
     const HEALTH_MS = 5000;
     const DEBOUNCE_MS = 150;
+    //: 建议请求多久没回来就当它挂了。服务端自己 400ms 就会超时回落到启发式，
+    //: 所以正常绝不会摸到这个值；它防的是连接被吞掉这种"永远不回来"的情况。
+    const ADVISE_TIMEOUT_MS = 4000;
     const RANKS = ['3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A', '2', '小王', '大王'];
 
     const store = {
@@ -57,10 +66,12 @@
         }
     })();
 
-    // engine: 'heuristic' | 'douzero'（两个引擎选项；douzero 要等 Phase 4 权重就位）
-    // auto: **一个总开关**——叫分、出牌、续局全归它管；delayMs 是出手前的可视延迟
+    // engine: 'heuristic' | 'douzero'（两个引擎选项）
+    // auto: 代打开关——叫分 + 出牌；autoContinue: 终局后自己点「再来一局」，**独立开关**
+    //       （两者互不影响：只续局不代打是合法组合）；delayMs 是出手前的可视延迟
     const config = Object.assign(
-        {collapsed: false, engine: 'heuristic', left: null, top: null, auto: true, delayMs: 700},
+        {collapsed: false, engine: 'heuristic', left: null, top: null,
+         auto: true, autoContinue: true, delayMs: 700},
         store.get('ddz-copilot-config', {}),
     );
 
@@ -78,6 +89,8 @@
     let handEl = null;
     let lastActedVersion = -1;   // 已经代为出手过的局面（防重复点击）
     let continuedOnce = false;   // 续局只点一次
+    let adviseWatchdog = null;   // 在飞请求的看门狗：挂死了要能自己解套
+    let adviseToken = 0;         // 回执令牌：只有最新那次请求的收尾算数
     let pending = null;          // 待执行动作：{version, timer, label}
 
     // ---------------------------------------------------------------- fetch 拦截
@@ -135,7 +148,7 @@
             }
             stopAdvising();
             render();
-            if (config.auto) scheduleContinue();
+            if (config.autoContinue) scheduleContinue();
             return;
         }
         scheduleAdvise();
@@ -159,10 +172,32 @@
         adviseTimer = setTimeout(requestAdvise, DEBOUNCE_MS);
     }
 
+    /** 收尾只认**最新**那次请求的回执：看门狗判超时后重发过的话，
+     *  姗姗来迟的旧响应不许把新请求的在飞状态清掉。 */
+    function finishAdvise(token) {
+        if (token !== adviseToken) return;
+        adviseInFlight = false;
+        clearTimeout(adviseWatchdog);
+        adviseWatchdog = null;
+    }
+
     function requestAdvise() {
-        if (adviseInFlight || !latestState) return;
+        if (!latestState || !myTurn()) return;
+        if (advice && advice.version === latestState.version) return;   // 这个局面已经有建议了
+        // 有请求在飞：**不能就这么算了**。它回来时会自己再排一次（见 .then 里的 scheduleAdvise），
+        // 但要是它挂死了（连接被吞、服务端卡住），就必须靠下面的看门狗解套，
+        // 否则面板会永远停在「正在算…」——这正是"有概率卡住、过一会又好了"的成因。
+        if (adviseInFlight) return;
         const version = latestState.version;
+        const token = ++adviseToken;
         adviseInFlight = true;
+        adviseWatchdog = setTimeout(() => {
+            if (token !== adviseToken) return;
+            finishAdvise(token);
+            lastError = '建议请求超时，正在重试';
+            render();
+            scheduleAdvise();
+        }, ADVISE_TIMEOUT_MS);
         post('/advise', {
             session,
             game_id: currentGameId(),
@@ -170,18 +205,21 @@
             options: {agent: engineSpec()},
         })
             .then((data) => {
-                adviseInFlight = false;
+                finishAdvise(token);
                 markServiceOk(true);
                 lastError = '';
-                if (!data) return;
-                if (latestState && latestState.version !== version) return; // 过期响应直接丢
-                advice = Object.assign({version}, data);
-                if (!data.ok) lastError = data.message || data.reason || '';
-                render();
-                autoAct(data);
+                if (data && (!latestState || latestState.version === version)) {
+                    advice = Object.assign({version}, data);
+                    if (!data.ok) lastError = data.message || data.reason || '';
+                    render();
+                    autoAct(data);
+                }
+                // 一问一答期间的任何情况都在这里收口：局面翻页了就立刻为新局面再算一次，
+                // 已经不缺建议时 scheduleAdvise 自己会短路，不会空转。
+                scheduleAdvise();
             })
             .catch((err) => {
-                adviseInFlight = false;
+                finishAdvise(token);
                 requestFailures += 1;
                 lastError = `建议请求失败（第 ${requestFailures} 次）：${String(err && err.message ? err.message : err)}`;
                 render();
@@ -217,9 +255,14 @@
 
     function markServiceOk(ok) {
         if (ok) requestFailures = 0;
-        if (serviceOk === ok) return;
-        serviceOk = ok;
-        render();
+        if (serviceOk !== ok) {
+            serviceOk = ok;
+            render();
+        }
+        // 只要确认服务在，就补算当前局面。**不能只在"状态翻转"时补**：连续失败几次后
+        // 重试会放弃，那时 serviceOk 一直是真的，翻转判断就永远不会再触发，
+        // 这个局面就被永远留在"没有建议"上了。重复调用会被 scheduleAdvise 自己短路。
+        if (ok) scheduleAdvise();
     }
 
     /** health 探活：它才是"服务在不在"的权威，单次 /advise 失败不作数。 */
@@ -248,16 +291,20 @@
         ui = {
             panel: shadow.querySelector('.panel'),
             banner: shadow.querySelector('.banner'),
+            mini: shadow.querySelector('.mini'),
             body: shadow.querySelector('.body'),
             toggle: shadow.querySelector('.collapse'),
             selectBtn: shadow.querySelector('.select'),
             masterBtn: shadow.querySelector('.auto-master'),
+            nextBtn: shadow.querySelector('.auto-next'),
             status: shadow.querySelector('.status'),
             engines: Array.from(shadow.querySelectorAll('.engine')),
             header: shadow.querySelector('.header'),
+            ver: shadow.querySelector('.ver'),
             footer: shadow.querySelector('.footer'),
         };
 
+        if (ui.ver) ui.ver.textContent = 'v' + VERSION;
         if (config.collapsed) ui.panel.classList.add('collapsed');
         ui.masterBtn.addEventListener('click', () => {
             config.auto = !config.auto;
@@ -272,6 +319,14 @@
             config.collapsed = !config.collapsed;
             ui.panel.classList.toggle('collapsed', config.collapsed);
             store.set('ddz-copilot-config', config);
+        });
+        ui.nextBtn.addEventListener('click', () => {
+            config.autoContinue = !config.autoContinue;
+            store.set('ddz-copilot-config', config);
+            render();
+            if (config.autoContinue && latestState && latestState.phase === 'finished') {
+                scheduleContinue();   // 打开时这局可能已经结束了
+            }
         });
         ui.selectBtn.addEventListener('click', () => { selectRecommended(); });
         ui.engines.forEach((button) => button.addEventListener('click', () => {
@@ -362,6 +417,23 @@
         ui.banner.textContent = banner;
         ui.banner.className = 'banner ' + (kind || (state && !myTurn() ? 'muted' : ''));
 
+        // 折叠时的建议条：收起来了，建议也得看得见
+        ui.mini.replaceChildren();
+        if (config.collapsed && data && data.ok) {
+            if (data.bidding) {
+                ui.mini.append(el('span', 'desc', `建议：${data.bidding.label}`));
+            } else if (data.recommended) {
+                const cards = el('div', 'cards small');
+                (data.recommended.cards || []).forEach((id) => cards.append(cardEl(id)));
+                if (!data.recommended.cards || !data.recommended.cards.length) {
+                    cards.append(el('span', 'pass', '不出'));
+                }
+                ui.mini.append(cards, el('span', 'desc', data.recommended.description || ''));
+            }
+        } else if (config.collapsed && data && data.reason === 'no_engine') {
+            ui.mini.append(el('span', 'note', 'DouZero 未就绪，点开切回启发式'));
+        }
+
         // 身体
         ui.body.replaceChildren();
         const usable = !!data && data.ok;
@@ -401,9 +473,15 @@
         // 总开关 + 状态行
         ui.masterBtn.textContent = `自动打牌：${config.auto ? '开' : '关'}`;
         ui.masterBtn.classList.toggle('on', !!config.auto);
+        ui.nextBtn.textContent = `自动续局：${config.autoContinue ? '开' : '关'}`;
+        ui.nextBtn.classList.toggle('on', !!config.autoContinue);
         if (!config.auto) {
             ui.status.textContent = '纯建议模式（不代打）';
             ui.status.className = 'status';
+        } else if (serviceOk === false) {
+            // 服务都没了还说"正在算…"是这个面板最误导人的地方：它压根没在算。
+            ui.status.textContent = '服务未启动，代打暂停';
+            ui.status.className = 'status bad';
         } else if (pending) {
             ui.status.textContent = `⏳ ${pending.label}`;
             ui.status.className = 'status';
@@ -411,10 +489,13 @@
             ui.status.textContent = `⚠ ${lastError}`;
             ui.status.className = 'status';
         } else if (state && state.phase === 'finished') {
-            ui.status.textContent = continuedOnce ? '已点续局' : '准备续局…';
-            ui.status.className = 'status active';
+            ui.status.textContent = !config.autoContinue
+                ? '本局已结束（续局已关）'
+                : (continuedOnce ? '已点续局' : '准备续局…');
+            ui.status.className = config.autoContinue ? 'status active' : 'status';
         } else if (!data && myTurn()) {
-            ui.status.textContent = '自动 · 正在算…';
+            // 只有**真有请求在飞**才说"正在算"；没在算却说正在算，就是面板在骗人
+            ui.status.textContent = adviseInFlight ? '自动 · 正在算…' : '自动 · 等待建议…';
             ui.status.className = 'status active';
         } else {
             ui.status.textContent = '自动 · 叫分 / 出牌 / 续局';
@@ -560,7 +641,7 @@
 
     /** 结算弹窗可能比状态晚一拍才渲染出来，所以续局要试几次。 */
     function scheduleContinue(attempt = 0) {
-        if (!config.auto || continuedOnce || attempt > 8) return;
+        if (!config.autoContinue || continuedOnce || attempt > 8) return;
         setTimeout(() => {
             if (continuedOnce) return;
             autoContinue();
@@ -698,7 +779,7 @@
 
     /** 终局后自动进入下一局 / 下一场（按按钮文本找，和参考脚本同一套约定）。 */
     function autoContinue() {
-        if (!config.auto || continuedOnce) return;
+        if (!config.autoContinue || continuedOnce) return;
         const isContinue = (text) =>
             (text.indexOf('→') !== -1 || text.indexOf('再来一局') !== -1
                 || text.indexOf('再来一场比赛') !== -1) && text.indexOf('发送') === -1;
@@ -718,7 +799,8 @@
     // ---------------------------------------------------------------- 帮我选中
 
     /*
-     * 只做"选中"，绝不点出牌、绝不调接口。做法（PLAN §0.1 核实过）：
+     * 这一段只做"选中"：它自己绝不点出牌、绝不调接口（代打在「自动执行」那一段）。
+     * 做法（PLAN §0.1 核实过）：
      *   - 先向 .ddz-table 派发 contextmenu 清空已有选择；
      *   - 再对每张建议牌派发 pointerdown + pointerup（合成 pointerId，页面里 setPointerCapture
      *     会抛异常但已被吞掉，drag 已经生效）；
@@ -807,6 +889,15 @@
             .banner.bad { background: rgba(198, 40, 40, .4); color: #ffe1e1; }
             .banner.muted { color: #9aa0a6; }
             .panel.collapsed .body, .panel.collapsed .footer, .panel.collapsed .toolbar { display: none; }
+            /* 折叠时只留横幅的话，轮到我了也只看得见"轮到你出牌"——建议本身必须还在 */
+            .mini { display: none; }
+            .panel.collapsed .mini {
+                display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+                padding: 6px 10px; background: rgba(255,255,255,.03);
+            }
+            .mini .card-img { height: 30px; }
+            .mini .desc { margin-top: 0; font-size: 12px; }
+            .mini .note { font-size: 11px; }
             .body { padding: 8px 10px 4px; display: flex; flex-direction: column; gap: 8px; max-height: 60vh; overflow-y: auto; }
             .block { border-top: 1px solid rgba(255,255,255,.08); padding-top: 7px; }
             .block:first-child { border-top: 0; padding-top: 0; }
@@ -854,7 +945,7 @@
             .toolbar label { display: flex; align-items: center; gap: 4px; color: #9aa0a6; font-size: 11px; cursor: pointer; }
             .toolbar.toggles { flex-wrap: wrap; gap: 8px; padding-top: 2px; }
             .toolbar.toggles label { color: #cfd3d8; }
-            .toolbar.master { padding: 6px 10px 2px; }
+            .toolbar.master { padding: 6px 10px 2px; gap: 6px; }
             .toolbar.master button {
                 flex: 1; text-align: center; font-size: 13px; padding: 6px 10px;
                 background: rgba(255,255,255,.12); color: #c8ccd1;
@@ -862,16 +953,19 @@
             .toolbar.master button.on { background: #2f6feb; color: #fff; font-weight: 600; }
             .status { padding: 3px 10px 0; font-size: 11px; color: #ffcc80; min-height: 14px; }
             .status.active { color: #81c995; }
+            .status.bad { color: #ff8a80; font-weight: 600; }
+            .header .ver { color: #8f9499; font-weight: 400; font-size: 11px; }
             .footer { padding: 5px 10px 7px; color: #8f9499; font-size: 11px; }
     `;
 
     const TEMPLATE = `
         <div class="panel">
             <div class="header">
-                <span class="title">斗地主 Copilot</span>
+                <span class="title">斗地主 Copilot <span class="ver"></span></span>
                 <button class="collapse" title="折叠/展开">–</button>
             </div>
             <div class="banner"></div>
+            <div class="mini"></div>
             <div class="body"></div>
             <div class="toolbar engines">
                 <button class="engine" data-engine="heuristic">启发式</button>
@@ -879,6 +973,7 @@
             </div>
             <div class="toolbar master">
                 <button class="auto-master">自动打牌：开</button>
+                <button class="auto-next">自动续局：开</button>
             </div>
             <div class="toolbar">
                 <button class="select" disabled>帮我选中</button>

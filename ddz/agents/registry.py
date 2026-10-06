@@ -4,6 +4,8 @@
 - ``random``（别名 ``rand``）——随机基线；
 - ``douzero:WP``（或 ``douzero:<权重目录>``）——上游 DouZero。**没装好不算错误**：构造出来的
   agent ``loaded=False``，每次决策都回落到启发式，并在理由里写明原因（服务的兜底路径不变）。
+- ``rlcard-rule``——上游 DouZero 仓库里那个 RLCard 规则基线（**别人的启发式**），只为竞技场
+  的第三方参照存在，**不进** :func:`available`（那是产品的引擎列表，只有启发式与 DouZero）。
 """
 
 from __future__ import annotations
@@ -41,6 +43,10 @@ def make(spec: str, **kwargs: Any) -> Agent:
         return HeuristicAgent(weights, **kwargs)
     if lowered in _RANDOM_ALIASES:
         return RandomAgent(**kwargs)
+    if lowered in ("rlcard-rule", "rlcard", "rlcard_rule"):
+        from .rlcard_rule import RLCardRuleAgent
+
+        return RLCardRuleAgent(**kwargs)
     if lowered.startswith("douzero"):
         from ..douzero.agent import DouZeroAgent
 

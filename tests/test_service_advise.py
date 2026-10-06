@@ -268,3 +268,88 @@ def test_userscript_automation_has_guards():
     assert "放弃这一手" in source                 # 核对不过就放弃，不瞎点
     assert "continuedOnce" in source             # 续局只点一次
     assert "platform_key" in source              # 多种读法时按平台 key 拨下拉框
+
+
+def test_userscript_shows_the_advice_when_collapsed():
+    """折叠起来也得看得见**建议本身**，不能只剩一句「轮到你出牌」。
+
+    收起时 body/toolbar/footer 全隐藏，横幅只会说"轮到你出牌"——建议要有一条自己的窄条。
+    """
+    source = USERSCRIPT.read_text(encoding="utf-8")
+    assert '<div class="mini"></div>' in source
+    assert ".panel.collapsed .mini" in source          # 折叠时才出现
+    assert "ui.mini.replaceChildren()" in source       # 每次重画都重建
+    # 折叠条要能在"不轮到我"时保持安静：只有拿到这个局面的建议才填内容
+    assert "config.collapsed && data && data.ok" in source
+
+
+def test_userscript_never_stalls_on_computing():
+    """一问一答必须闭环——这是"卡在正在算…、过一会又好了"那个 bug 的回归测试。
+
+    成因：定时器到点时若有请求在飞，``requestAdvise`` 直接返回**且不重排**；那个在飞的
+    响应回来时若局面已翻页又被丢掉、**也不重排**。于是没有任何人再排一次，面板一直等到
+    下一个局面（你出手、对方出牌、或平台 15 秒托管）才恢复。DouZero 响应更慢，窗口更大，
+    所以它更容易撞上。
+
+    这里只能查形状（真行为要在浏览器里验）：闭环的两端都在才算数。
+    """
+    source = USERSCRIPT.read_text(encoding="utf-8")
+    # 一端：响应回来（无论新旧）都要再排一次——这句注释就是那个修复的锚点
+    assert "局面翻页了就立刻为新局面再算一次" in source
+    assert source.count("scheduleAdvise();") >= 6
+    # 另一端：挂死的请求要有看门狗，且每条收尾路径都清掉它
+    assert "ADVISE_TIMEOUT_MS" in source
+    assert "adviseWatchdog" in source
+    assert source.count("finishAdvise(token);") == 3   # then / catch / 看门狗，三条路都要收尾
+    assert "adviseToken" in source                    # 旧响应不许清新请求的在飞状态
+    # 服务恢复也要补算当前局面
+    assert "if (ok) scheduleAdvise();" in source
+
+
+def test_userscript_status_line_never_lies():
+    """状态行说"正在算"就必须真在算——这是"python 关了还显示正在算"那个 bug 的回归测试。
+
+    以前它只看 ``!data && myTurn()``：服务停了、请求根本没发出去、连失败重试都放弃了，
+    它照样一本正经地说"自动 · 正在算…"。用户看到的就是这个。
+    """
+    source = USERSCRIPT.read_text(encoding="utf-8")
+    # 服务不在 → 明说，且不再假装在算
+    assert "服务未启动，代打暂停" in source
+    assert "serviceOk === false" in source
+    # "正在算"只在真有请求在飞时出现
+    assert "adviseInFlight ? '自动 · 正在算…' : '自动 · 等待建议…'" in source
+    # 失败重试不能悄悄放弃：确认服务在就补算当前局面（不只在状态翻转时）
+    assert "if (ok) scheduleAdvise();" in source
+
+
+def test_userscript_shows_its_version():
+    """面板上要能看见脚本版本——"我到底更新成功没有"不该靠猜。
+
+    油猴更新后必须刷新页面才生效，看不到版本就只能靠症状猜。
+    """
+    import re
+
+    source = USERSCRIPT.read_text(encoding="utf-8")
+    header = re.search(r"// @version\s+(\S+)", source)
+    inline = re.search(r"const VERSION = '([^']+)'", source)
+    assert header and inline, "两处版本号都要在"
+    assert header.group(1) == inline.group(1), "头部 @version 与面板显示的版本必须一致"
+    assert 'ui.ver.textContent' in source
+
+
+def test_userscript_continue_is_its_own_switch():
+    """续局要能从代打里拆出来单独开关（用户要求）。
+
+    两者互不影响是**有意**的："只自动续局、不代打"（自己出牌但不想每局都手点再来一局）
+    和"只代打、不续局"（打完这局想歇一下）都得能配出来。
+    """
+    source = USERSCRIPT.read_text(encoding="utf-8")
+    assert 'class="auto-next"' in source
+    assert "config.autoContinue = !config.autoContinue" in source
+    # 续局的两处守卫都只看自己的开关，不看 auto
+    assert "if (!config.autoContinue || continuedOnce || attempt > 8) return;" in source
+    assert "if (!config.autoContinue || continuedOnce) return;" in source
+    # 终局分发也只看续局开关
+    assert "if (config.autoContinue) scheduleContinue();" in source
+    # 代打那两处守卫仍然只看 auto（别把出牌也放开了）
+    assert "function autoAct(data) {\n        if (!config.auto) return;" in source

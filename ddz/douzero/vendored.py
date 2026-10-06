@@ -28,7 +28,8 @@ from types import ModuleType
 
 __all__ = [
     "DouZeroModules", "root_dir", "commit", "is_installed", "torch_available",
-    "load_env", "load_model_modules", "status", "ENV_MODULES", "MODEL_MODULES",
+    "load_env", "load_model_modules", "load_rlcard_agent", "status",
+    "ENV_MODULES", "MODEL_MODULES",
 ]
 
 #: 只需要 python/numpy 的叶子模块（按依赖顺序）。
@@ -147,6 +148,30 @@ def load_env(root: str | None = None) -> DouZeroModules | None:
         selector=loaded["douzero.env.move_selector"],
         utils=loaded["douzero.env.utils"],
     )
+
+
+@lru_cache(maxsize=2)
+def load_rlcard_agent() -> ModuleType | None:
+    """加载上游的 RLCard 规则基线（``douzero/evaluation/rlcard_agent.py``）。
+
+    它 ``import rlcard`` 只是为了拿一张 ``CARD_TYPE`` 查表；没装 rlcard 就返回 ``None``
+    （``uv pip install rlcard``——两个纯 python 包，不碰 torch）。这个基线是**别人的启发式**，
+    拿来当竞技场里的第三方参照，见 :mod:`ddz.agents.rlcard_rule`。
+    """
+    if not is_installed():
+        return None
+    import importlib.util
+
+    if importlib.util.find_spec("rlcard") is None:
+        return None
+    base = root_dir()
+    _ensure_package("douzero", base / "douzero")
+    _ensure_package("douzero.evaluation", base / "douzero" / "evaluation")
+    module = _load_leaf(
+        "douzero.evaluation.rlcard_agent", base / "douzero" / "evaluation" / "rlcard_agent.py"
+    )
+    _assert_vendored(module, base)
+    return module
 
 
 @lru_cache(maxsize=4)

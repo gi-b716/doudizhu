@@ -259,11 +259,17 @@ def _last_two(sequence: Sequence[Sequence[int]]) -> list[list[int]]:
     return [list(item) for item in tail]
 
 
-def _last_pid(landlord: int, events: Sequence[dict]) -> str | None:
+def _last_pid(landlord: int, events: Sequence[dict]) -> str:
+    """最后一个**真出了牌**的位置名（不出不算）。
+
+    逐字对齐上游：``step()`` 里只有 ``len(action) > 0`` 才更新 ``last_pid``，而它初始化成
+    ``'landlord'``——所以还没人出牌时是 ``'landlord'``，不是"没有"。上游的 RLCard 基线会读这个
+    字段来判断"上家是不是队友"，差一个 ``None`` 就会让它在该不出的时候乱出。
+    """
     for event in reversed(events):
         if event.get("kind") == "play" and event.get("seat") in SEATS:
             return position_of(landlord, event["seat"])
-    return None
+    return "landlord"
 
 
 # --------------------------------------------------------------------- 推理

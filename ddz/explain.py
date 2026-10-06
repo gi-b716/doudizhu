@@ -180,6 +180,22 @@ def reason_feed(count: int, reliable: bool = True) -> str:
     return f"队友只剩 {count} 张，出张小牌喂他（地主夹在中间，未必接得上）"
 
 
+def reason_rlcard_lead(label: str) -> str:
+    return f"RLCard 规则基线：按它的拆牌最先甩掉最小的那张（{label}）"
+
+
+def reason_rlcard_follow(label: str) -> str:
+    return f"RLCard 规则基线：压同型里最小的一手（{label}）"
+
+
+def reason_rlcard_teammate() -> str:
+    return "RLCard 规则基线：上家是队友，不压"
+
+
+def reason_rlcard_random() -> str:
+    return "RLCard 规则基线：没有同型能压，它在合法着法里随机抓了一手"
+
+
 def reason_quiet() -> str:
     return "这一手不拆结构、不动大牌，按拆解走最省"
 
