@@ -59,6 +59,10 @@ def make(spec: str, **kwargs: Any) -> Agent:
         # "douzero" / "douzero:WP" 用默认权重目录；"douzero:<路径>" 指定目录
         _, _, tail = name.partition(":")
         weights_path = None if tail in ("", "WP", "wp") else tail
+        # DouZero 没有叫分模型（叫分永远走启发式），所以叫分门槛要交给兜底的启发式
+        bid_thresholds = kwargs.pop("bid_thresholds", None)
+        if bid_thresholds is not None and "fallback" not in kwargs:
+            kwargs["fallback"] = HeuristicAgent(bid_thresholds=bid_thresholds)
         agent = DouZeroAgent(weights_path, **kwargs)
         agent.load()   # 尽力装载；失败也不抛，决策时回落启发式
         return agent

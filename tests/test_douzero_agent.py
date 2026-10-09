@@ -147,3 +147,12 @@ def test_bench_reports_missing_pieces_instead_of_faking_numbers(capsys):
     assert code == 2
     out = capsys.readouterr().out
     assert "还没就绪" in out and "权重" in out
+
+
+def test_registry_hands_bid_thresholds_to_the_heuristic_fallback():
+    """DouZero 不叫分：叫分门槛必须交给兜底的启发式，否则 A/B 时 DouZero 那一方还是旧门槛。"""
+    from ddz.engine.bidding import BidThresholds
+
+    agent = make("douzero:WP", bid_thresholds=(6, 8, 10))
+    assert agent.fallback.bid_thresholds == BidThresholds(6.0, 8.0, 10.0)
+    assert make("douzero:WP").fallback.bid_thresholds is None   # 不给就用默认

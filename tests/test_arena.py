@@ -287,3 +287,47 @@ def test_simulated_state_is_enough_to_build_a_douzero_infoset():
         assert info.last_move, "跟牌时 last_move 必须有牌"
     assert sum(len(v) for v in info.played_cards.values()) == len(state.played_cards)
     assert len(info.legal_actions) >= 1
+
+
+def test_douzero_agent_is_built_once_per_match_not_once_per_game(monkeypatch):
+    """DouZero 每局重新装三份模型太慢：同一配置的 agent 应当复用（无状态，复用不改变结果）。"""
+    from ddz.arena import match as match_module
+
+    built = []
+    real_make = match_module.make
+
+    def counting_make(name, **kwargs):
+        if name.startswith("douzero"):
+            built.append(name)
+        return real_make(name, **kwargs)
+
+    monkeypatch.setattr(match_module, "make", counting_make)
+    metrics, _ = match_module.run_match(["douzero:WP", "heuristic", "heuristic"], games=6, seed=3, rotate=True)
+    assert len(built) == 1
+    assert metrics.summary(meta={}, include_games=False)  # 结果照常出
+
+
+def test_match_cli_passes_bid_thresholds_to_heuristic_and_douzero_only(tmp_path, capsys):
+    from ddz.arena import match as match_module
+
+    seen = []
+    real_run = match_module.run_match
+
+    def spy(players, **kwargs):
+        seen.append(kwargs.get("agent_kwargs"))
+        return real_run(players, **{**kwargs, "games": 3})
+
+    import pytest as _pytest
+
+    mp = _pytest.MonkeyPatch()
+    mp.setattr(match_module, "run_match", spy)
+    try:
+        match_module.main([
+            "--players", "heuristic,random,random", "--games", "3", "--seed", "1", "--quiet",
+            "--bid-thresholds", "6,8,10", "--out", str(tmp_path / "out"),
+        ])
+    finally:
+        mp.undo()
+    kwargs = seen[0]
+    assert set(kwargs) == {"heuristic"}                  # random 不接收叫分门槛
+    assert kwargs["heuristic"]["bid_thresholds"].three == 10.0

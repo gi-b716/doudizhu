@@ -108,8 +108,12 @@ class HeuristicAgent:
 
     name = "heuristic"
 
-    def __init__(self, weights: Weights | None = None) -> None:
+    def __init__(self, weights: Weights | None = None, *, bid_thresholds=None) -> None:
+        from .bidding import as_thresholds
+
         self.weights = weights or DEFAULT_WEIGHTS
+        #: 叫分门槛；``None`` 用 :data:`ddz.engine.bidding.THRESHOLDS`。竞技场 A/B 时用来换门槛
+        self.bid_thresholds = as_thresholds(bid_thresholds)
 
     # ----------------------------------------------------------------- 出牌
 
@@ -404,6 +408,7 @@ class HeuristicAgent:
             high_bid=state.high_bid,
             must_bid=state.must_bid,
             legal=state.legal_bids,
+            thresholds=self.bid_thresholds,
         )
 
 

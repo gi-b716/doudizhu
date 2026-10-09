@@ -33,6 +33,10 @@ uv run python -m ddz.tools.verify_fairness --records data/games.jsonl
 # 自对弈竞技场：胜率 / ADP / 延迟报表 → runs/<名字>/summary.json
 uv run python -m ddz.arena.match --players heuristic,random,random --games 200 --seed 7 --rotate
 uv run python -m ddz.arena.match --players douzero:WP,heuristic,heuristic --games 300 --seed 11      --rotate --out runs/dz_vs_heur        # Phase 4
+# 叫分门槛 A/B：候选 vs 基线，同一桌 1 候选 + 2 基线，配对种子，给 95% 置信区间
+uv run python -m ddz.tools.bid_ab --candidate 10 --baseline -2,2,6 --games 6000 --seed 5000
+# DouZero 模式（本机有 torch + 权重时）：DouZero 不叫分，门槛作用于它的兜底启发式
+uv run python -m ddz.tools.bid_ab --engine douzero:WP --candidate 10 --baseline -2,2,6 --games 3000
 ```
 
 ### 装浮窗（Phase 3 起可用）

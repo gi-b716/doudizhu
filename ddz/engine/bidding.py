@@ -5,8 +5,8 @@ PLAN §3.3 的公式（见 :func:`ddz.engine.decomposer.hand_strength`）::
     hand_strength = 2.2·#王 + 1.4·#2 + 0.8·#A + 3.0·#炸 + 4.0·王炸
                     + (17 − 3.2·手数) + 0.5·顺子加成
 
-阈值是**用竞技场校准**出来的（见 :data:`THRESHOLDS` 的注释），不是拍脑袋：先按公式在
-10 万手随机牌上取分位数，再看自对弈里叫分是否合理。
+阈值按**期望收益**定，再用竞技场验证（见 :data:`THRESHOLDS` 的注释）。旧版是按「叫分频率」
+校准的（让约 45% 的手牌够叫 1 分），目标本身就错：叫 1、2 分的地主实际只赢 34% / 39%。
 
 ``must_bid``（连续流局 3 次后本轮最后一位）强制 ≥1，理由里点明原因——rules.md 的规则，
 不是我们的偏好。
@@ -23,12 +23,18 @@ from ..explain import (
 from .base import Bid
 from .decomposer import best_decomposition, hand_strength
 
-__all__ = ["THRESHOLDS", "BidThresholds", "bid_for", "strength_of"]
+__all__ = ["THRESHOLDS", "BidThresholds", "as_thresholds", "parse_thresholds", "bid_for", "strength_of"]
 
-#: (叫 1 / 2 / 3 分) 的牌力阈值。校准方式：3000 手随机 17 张牌的牌力分位数——
-#: p55 ≈ −2.1、p82 ≈ +2.0、p94 ≈ +5.8，取整后让约 45% / 18% / 6% 的手牌够叫
-#: 1 / 2 / 3 分（三人全不叫的概率约 17%，与实际对局里偶尔流局同量级）。
-THRESHOLDS: tuple[float, float, float] = (-2.0, 2.0, 6.0)
+#: (叫 1 / 2 / 3 分) 的牌力阈值。**三档必须相同**，理由与实测：
+#:
+#: - 叫分的期望收益是 ``2 · 叫分 · 倍数 · (2P − 1)``，P 为地主胜率。叫分只是乘数，
+#:   符号完全由 P 决定；P > 0.5 时叫 3 分的收益永远是叫 1 分的 3 倍，所以 1、2 分没有保留的理由。
+#: - 竞技场实测（旧阈值三家自对弈 6000 局）：叫 1 分的地主胜率 34%、叫 2 分 39%，地主 ADP 分别
+#:   −0.72 / −1.00，都是明显负期望；叫 3 分的地主胜率约 49%。叫 3 分的门槛用 6 时，牌力 [10,12)
+#:   段的地主 ADP 才明显转正（+1.2），所以门槛取 10。
+#: - 相对旧阈值 (−2, 2, 6) 的 ADP 增益（配对种子）：1 个候选 vs 2 个旧版 +0.33 ±0.07（换种子 9000
+#:   为 +0.43 ±0.07）；2 个候选 vs 1 个旧版 +0.35 ±0.05。门槛 8～12 是平台期，取偏保守的 10。
+THRESHOLDS: tuple[float, float, float] = (10.0, 10.0, 10.0)
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,6 +42,26 @@ class BidThresholds:
     one: float = THRESHOLDS[0]
     two: float = THRESHOLDS[1]
     three: float = THRESHOLDS[2]
+
+
+def as_thresholds(value) -> BidThresholds | None:
+    """统一成 :class:`BidThresholds`：接受 ``None``、现成的对象、``(一, 二, 三)`` 三元组或字典。"""
+    if value is None or isinstance(value, BidThresholds):
+        return value
+    if isinstance(value, dict):
+        return BidThresholds(**{key: float(item) for key, item in value.items()})
+    one, two, three = (float(item) for item in value)
+    return BidThresholds(one, two, three)
+
+
+def parse_thresholds(text: str) -> BidThresholds:
+    """命令行写法：``10`` 表示三档都是 10；``6,8,10`` 表示依次是叫 1 / 2 / 3 分的门槛。"""
+    parts = [part.strip() for part in str(text).split(",") if part.strip()]
+    if len(parts) == 1:
+        parts = parts * 3
+    if len(parts) != 3:
+        raise ValueError(f"叫分门槛要么一个数，要么三个数（叫 1/2/3 分）：{text!r}")
+    return as_thresholds(parts)
 
 
 def strength_of(hand) -> float:
@@ -66,13 +92,6 @@ def bid_for(
 
     levels = thresholds or BidThresholds()
     strength = hand_strength(cards, best_decomposition(cards))
-    wanted = 0
-    if strength >= levels.three:
-        wanted = 3
-    elif strength >= levels.two:
-        wanted = 2
-    elif strength >= levels.one:
-        wanted = 1
 
     # 只在"合法、且牌力确实够"的档位里挑最高的：叫不了自己的档就不硬上更高的一档
     affordable = [0] + [v for v in (1, 2, 3) if strength >= _threshold_of(v, levels)]
