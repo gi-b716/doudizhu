@@ -257,6 +257,29 @@ def reason_take_over(count: int) -> str:
     return f"队友还有 {count} 张，你更接近走完，接管这一手"
 
 
+def reason_lead_guard(label: str, count: int, pattern_name: str) -> str:
+    """硬规则 6（领出）：别把对手能一把压过并走完的牌型领出去。"""
+    return f"{label}只剩 {count} 张，不领{pattern_name}——他压过去就走完了"
+
+
+def reason_lead_last_resort(label: str, count: int, card: str) -> str:
+    """硬规则 6 的退路：手里只有他能压的牌型，那就领最大的赌一把。"""
+    return f"{label}只剩 {count} 张，手里只剩他可能压过的牌型，领最大的 {card} 赌他压不过"
+
+
+def reason_block_guard(label: str, count: int) -> str:
+    """硬规则 6（跟牌）：压牌要挑他压不过的那一张，否则等于把牌权送给他。"""
+    return f"{label}只剩 {count} 张，挑他压不过的牌压——否则这一手就把牌权送给他"
+
+
+def reason_overtake_partner(label: str, partner_count: int, count: int) -> str:
+    """「队友 ≤2 张绝不压」的例外：对手也快走完，放行等于直接送局。"""
+    return (
+        f"队友只剩 {partner_count} 张本该放行，但{label}只剩 {count} 张、压过这一手就走完——"
+        f"必须先抢下来"
+    )
+
+
 def reason_must_block(label: str, count: int) -> str:
     return f"{label}只剩 {count} 张，必须拦下这一手"
 

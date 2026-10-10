@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         斗地主 Copilot
 // @namespace    ddz-copilot
-// @version      0.7.4
+// @version      0.7.5
 // @description  真实对局中实时给出可解释的出牌建议；可选代打（叫分/出牌、续局各自独立开关）
 // @author       you
 // @include      /^https?:\/\/[^/]+\/games\/doudizhu/
@@ -28,7 +28,7 @@
     'use strict';
 
     //: 面板上会显示它——"我到底更新成功没有"要能一眼看出来（必须与头部 @version 一致）
-    const VERSION = '0.7.4';
+    const VERSION = '0.7.5';
     const API = 'http://127.0.0.1:17876';
     const HEALTH_MS = 5000;
     const DEBOUNCE_MS = 150;
@@ -37,6 +37,8 @@
     //: 建议请求多久没回来就当它挂了。服务端自己 400ms 就会超时回落到启发式，
     //: 所以正常绝不会摸到这个值；它防的是连接被吞掉这种"永远不回来"的情况。
     const ADVISE_TIMEOUT_MS = 4000;
+    //: 被平台托管后，隔多久可以再点一次「取消托管」（别和页面的渲染抢）
+    const HOSTING_RETRY_MS = 3000;
     const RANKS = ['3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A', '2', '小王', '大王'];
 
     const store = {
@@ -285,7 +287,7 @@
             auto_continue: config.autoContinue, endgame_mode: endgameMode,
             // 叫分档位也归档：不记的话，事后只能从"叫了几分"反推当时用的哪档
             bid: config.bid,
-            decisions: [], auto_actions: 0, auto_passes: 0, hosted: 0,
+            decisions: [], auto_actions: 0, auto_passes: 0, hosted: 0, hosting_cancels: 0,
         };
     }
 
@@ -310,6 +312,29 @@
         const me = state.players && state.players[state.seat];
         hostedNow = !!(me && me.auto);
         if (hostedNow && panelLog) panelLog.hosted += 1;
+    }
+
+    /*
+     * 被托管时点页面自己的「取消托管」把控制权要回来（代打的底线：只驱动页面自己的按钮）。
+     * 为什么要自动点：托管**不会自己结束**——平台会替我们打完整局。真实对局里那 12 局有
+     * 11 局是从第一手就被代打到结束的，净 −44 分（−3.67/局），而同期自己打的 108 局只有
+     * −0.72/局；其中最贵的一局（39342，底分3×3，−18）是平台在**叫分**阶段替我们叫了 3 分，
+     * 而那手牌牌力只有 −9.4（启发式和 DouZero 都不会叫）。面板原来只显示「代打让位」，
+     * 等于把整局让给机器人。
+     * 节流：每 HOSTING_RETRY_MS 最多点一次；只在「自动打牌」开着时才点（手动模式尊重用户）。
+     */
+    let lastHostingCancel = 0;
+    function cancelHosting() {
+        if (!config.auto || !hostedNow) return false;
+        const now = Date.now();
+        if (now - lastHostingCancel < HOSTING_RETRY_MS) return false;
+        const button = visibleButton((text) => text === '取消托管');
+        if (!button) return false;
+        lastHostingCancel = now;
+        if (panelLog) panelLog.hosting_cancels += 1;
+        console.warn('[ddz-copilot] 平台在托管我们，点「取消托管」要回控制权');
+        button.click();
+        return true;
     }
 
     function engineSpec() {
@@ -617,8 +642,9 @@
                 : (continuedOnce ? '已点续局' : '准备续局…');
             ui.status.className = config.autoContinue ? 'status active' : 'status';
         } else if (hostedNow) {
-            // 平台接管时我们按什么都轮不上——这里写"正在算…"就是骗人（复盘时正是这么被骗的）
-            ui.status.textContent = '⚠ 平台托管中，代打让位';
+            // 平台接管时我们按什么都轮不上——这里写"正在算…"就是骗人（复盘时正是这么被骗的）。
+            // 开了「自动打牌」时心跳会去点「取消托管」，状态行要说实话：正在要回控制权。
+            ui.status.textContent = config.auto ? '⚠ 平台托管中，正在要回控制权…' : '⚠ 平台托管中，代打让位';
             ui.status.className = 'status bad';
         } else if (!data && myTurn()) {
             // 只有**真有请求在飞**才说"正在算"；没在算却说正在算，就是面板在骗人
@@ -1035,8 +1061,20 @@
         } catch (e) { /* 页面处理器里的异常不该影响我们 */ }
     }
 
+    /*
+     * 等一帧。**不能只用 requestAnimationFrame**：页面在后台标签里 rAF 根本不触发，
+     * 于是 selectRecommended() 里那串 await 会永远停在第一张牌上——平台的 15/30 秒
+     * 计时走完就把我们托管了，整局交给平台机器人打。真实对局 120 局里有 12 局是这样
+     * （净 −44 分、−3.67/局，同期自己打的 108 局只有 −0.72/局），其中 11 局从第一手
+     * 就被代打到结束。这里让 rAF 和 setTimeout 谁先到算谁：前台行为不变，后台也能往下走。
+     */
     function nextFrame() {
-        return new Promise((resolve) => requestAnimationFrame(() => resolve()));
+        return new Promise((resolve) => {
+            let done = false;
+            const finish = () => { if (!done) { done = true; resolve(); } };
+            requestAnimationFrame(finish);
+            setTimeout(finish, 50);
+        });
     }
 
     // ---------------------------------------------------------------- 启动
@@ -1058,6 +1096,8 @@
         // 间隔必须**大于**防抖时间，否则会一次次把定时器重置掉、请求永远发不出去。
         setInterval(() => {
             if (!latestState) return;
+            // 被平台托管时先要回控制权：这时候建议/出牌全都轮不上我们
+            if (hostedNow && cancelHosting()) return;
             // 结算画面出来了但平台没推终局 state：该续局就续局，别干等
             if (config.autoContinue && !continuedOnce && gameLooksOver()) {
                 scheduleContinue();

@@ -12,12 +12,18 @@
 1. 无牌可管 → 不出；
 2. 能一把走完 → 立刻走；
 3. 对手只剩 ≤2 张而我在跟牌 → **必须拦**（挑最好的能压的牌；一张都压不上则给出警告）；
-4. 上家是队友 → **默认放行，但不是一律不出**。三种情况会压：
-   ① 队友 ≤2 张 → 铁律，绝不压；② **顺手打废牌**——队友还有 5 张以上、我这一手不伤结构、
+4. 上家是队友 → **默认放行，但不是一律不出**。四种情况会压：
+   ① 队友 ≤2 张 → 铁律，绝不压（**除非对手也只剩 ≤2 张**：那时放行等于送对手走完，见规则 6）；
+   ② **顺手打废牌**——队友还有 5 张以上、我这一手不伤结构、
    不动控制牌、而且本来就是拆解里要打的一手（比如手里孤零零一张 6）→ 压上去把废牌放掉；
    ③ 我 ≤3 手就走完 → 接管牌权（不再顾虑）；其余情况压队友要付 ``W_COOP`` 的"抢牌权"代价；
 5. 炸弹纪律：只用于赢牌、拦 ≤2 张的对手，或评分比最优非炸弹方案高出 ``bomb_margin``；
    绝不炸队友。
+6. 对手只剩 ≤2 张 → **别送他一把走完**：领出时避开"张数正好等于他剩牌数"的牌型（他只剩 1 张
+   就别领单张、只剩 2 张就别领对子——他要压就得跟同样张数，压过即出完），跟牌时挑他压不过的
+   那张压。判断"他压不压得过"用未见牌：把未见牌按点数从高到低分给他（他剩几张就拿最高的几张），
+   还能凑出更大的同型牌才算有风险。真实对局里这条值两局：31971（对手 1 张，我领单张 10，
+   他一张 Q 走完）与 32080（队友 1 张 A、地主 1 张 9，队友领单张 4，放行就是让地主 9 走完）。
 
 权重都是 :class:`Weights` 的字段，方便用对局库/竞技场调（PLAN §3.7）。
 """
@@ -29,10 +35,12 @@ from dataclasses import dataclass
 
 from .. import cards as C
 from ..explain import (
-    CONTROL_NAMES, bomb_ranks_text, control_rank_text, rank_list_text,
-    reason_block, reason_bomb, reason_bomb_as_plain, reason_bomb_hold, reason_feed,
-    reason_grabbing_partner, reason_keeps_control, reason_partner_dump, reason_quiet,
+    CONTROL_NAMES, PATTERN_NAMES, bomb_ranks_text, control_rank_text, rank_list_text,
+    reason_block, reason_block_guard, reason_bomb, reason_bomb_as_plain, reason_bomb_hold,
+    reason_feed, reason_grabbing_partner, reason_keeps_control, reason_lead_guard,
+    reason_lead_last_resort, reason_partner_dump, reason_quiet,
     reason_last_control, reason_must_block, reason_no_beat, reason_no_hand,
+    reason_overtake_partner,
     reason_not_worth, reason_partner_lead, reason_partner_low, reason_plays_saved,
     reason_plays_wasted, reason_splits, reason_take_over, reason_team, reason_tempo,
     reason_win,
@@ -65,6 +73,8 @@ class Weights:
     take_over_my_plays: int = 3
     #: 队友还有这么多张以上时，才考虑"顺手把废牌打掉"（他快走完就让他走）
     partner_dump_min_cards: int = 5
+    #: 硬规则 6：别把"对手能一把压过并走完"的牌型送到他面前（关掉只为了 A/B 对照）
+    walkout_guard: bool = True
 
 
 DEFAULT_WEIGHTS = Weights()
@@ -74,6 +84,46 @@ _MAX_CANDIDATES = 128
 
 #: 理由最多给几条（界面只展示前几条）。
 _MAX_REASONS = 3
+
+
+def _walkout_risk(move, unseen_ranks, counts, low_opponents) -> bool:
+    """这一手会不会让某个"只剩 1~2 张"的对手**一把压过并走完**（走完就直接输）。
+
+    对手要压就得跟**同样张数**的更大牌型，所以只有 ``他的张数 == 这一手的张数`` 才可能一把走完
+    （张数 ≤2 时他也拿不出炸弹）。压不压得过用未见牌判：把未见牌按点数从高到低分给他
+    （他剩几张就拿最高的几张），还能凑出更大的同型牌才算有风险。这么一来"大王单张""对子 2"
+    "王炸"天生就是安全的，不用特判； unseen 里含队友的牌，所以这是**偏保守**的判法。
+    """
+    size = len(move.cards)
+    if not any(counts[s] == size for s in low_opponents):
+        return False
+    rank = move.pattern.main_rank
+    return any(unseen_ranks[r] >= size for r in range(rank + 1, C.N_RANKS))
+
+
+def _guard_walkout(state, moves, counts, low_opponents, seat, to_beat):
+    """硬规则 6：滤掉会让对手一把走完的着法，返回 ``(着法, 理由)``。
+
+    领出时全都有风险 → 领点数最大的那一手，赌他手里那张更小（真实对局 31971：对手 1 张，
+    旧版领单张 10，对手一张 Q 走完；能赢的是对子/连对，或那张同样压不过的单张 Q）。
+    跟牌时全都有风险 → 照压不挑（硬规则 3 本来就必须拦）。
+    """
+    unseen = state.unseen_ranks
+    risky = [i for i, move in enumerate(moves) if _walkout_risk(move, unseen, counts, low_opponents)]
+    if not risky:
+        return moves, None
+    target = min(low_opponents, key=lambda s: counts[s])
+    label = seat_label(target, seat)
+    kept = [move for i, move in enumerate(moves) if i not in set(risky)]
+    if kept:
+        if to_beat is None:
+            name = PATTERN_NAMES["single"] if counts[target] == 1 else PATTERN_NAMES["pair"]
+            return kept, reason_lead_guard(label, counts[target], name)
+        return kept, reason_block_guard(label, counts[target])
+    if to_beat is None:
+        best = max(moves, key=lambda m: (m.pattern.main_rank, len(m.cards)))
+        return [best], reason_lead_last_resort(label, counts[target], C.card_name(max(best.cards)))
+    return moves, None
 
 
 def spends_whole_bomb(counts_before, spent) -> bool:
@@ -161,34 +211,54 @@ class HeuristicAgent:
         opponents = [s for s in SEATS if s != seat and s != partner]
         low_opponents = [s for s in opponents if 0 < counts[s] <= 2]
 
+        # 硬规则 6：别让只剩 1~2 张的对手"一把压过并走完"
+        guard_reason = None
+        if low_opponents and self.weights.walkout_guard:
+            moves, guard_reason = _guard_walkout(state, moves, counts, low_opponents, seat, to_beat)
+
         # 硬规则 4：上家是队友。只有"队友马上走完"才是铁的（绝不压）；
         # 其余情况走打分，但压队友要付一份抢牌权的代价——不然会出现"队友一出牌就一律不出"。
         following_partner = last_seat is not None and last_seat == partner and to_beat is not None
         takeover_reason = None
+        overtake_reason = None
         partner_penalty = 0.0
         if following_partner:
             partner_cards = counts[last_seat]
             if partner_cards <= 2:
-                return Candidate(
-                    None, 0.0,
-                    [reason_partner_low(partner_cards)],
-                    ["hard:partner_low"], source,
+                # 例外只在"对手真能一把压过队友这一手"时才成立：拿队友刚出的牌当"我这一手"
+                # 去问规则 6 的判据。真实对局 32080：队友 1 张 A、地主 1 张 9，队友领单张 4，
+                # 放行就是让地主 9 走完；而 37440 那种（队友领的牌压不过）照旧放行。
+                partner_at_risk = (
+                    self.weights.walkout_guard and state.last is not None
+                    and _walkout_risk(state.last, state.unseen_ranks, counts, low_opponents)
                 )
-            # 队友快走完了就让他走；但我要是在 3 手内就能走完，还是把废牌放掉抢牌权
-            closing_in = partner_cards < self.weights.partner_dump_min_cards
-            if not closing_in or n_plays(hand) <= self.weights.take_over_my_plays:
-                dump = self._free_dump(hand, moves)
-                if dump is not None:
+                if not partner_at_risk:
                     return Candidate(
-                        dump,
-                        self._card_costs(dump),
-                        [reason_partner_dump(C.card_name(max(dump.cards)), seat_label(last_seat, seat))],
-                        ["hard:partner_dump"], source,
+                        None, 0.0,
+                        [reason_partner_low(partner_cards)],
+                        ["hard:partner_low"], source,
                     )
-            if n_plays(hand) <= self.weights.take_over_my_plays:
-                takeover_reason = reason_take_over(partner_cards)
+                target = min(low_opponents, key=lambda s: counts[s])
+                overtake_reason = reason_overtake_partner(
+                    seat_label(target, seat), partner_cards, counts[target]
+                )
             else:
-                partner_penalty = self.weights.coop
+                # 队友快走完了就让他走；但我要是在 3 手内就能走完，还是把废牌放掉抢牌权
+                closing_in = partner_cards < self.weights.partner_dump_min_cards
+                if not closing_in or n_plays(hand) <= self.weights.take_over_my_plays:
+                    dump = self._free_dump(hand, moves)
+                    if dump is not None:
+                        return Candidate(
+                            dump,
+                            self._card_costs(dump),
+                            [reason_partner_dump(C.card_name(max(dump.cards)),
+                                                 seat_label(last_seat, seat))],
+                            ["hard:partner_dump"], source,
+                        )
+                if n_plays(hand) <= self.weights.take_over_my_plays:
+                    takeover_reason = reason_take_over(partner_cards)
+                else:
+                    partner_penalty = self.weights.coop
 
         scored = [
             self._score(state, seat, hand, move, partner, opponents, low_opponents, partner_penalty)
@@ -209,12 +279,19 @@ class HeuristicAgent:
         if takeover_reason is not None:
             reasons = [takeover_reason, *reasons]
             tags = [*tags, "hard:take_over"]
+        if guard_reason is not None:
+            reasons = [*reasons, guard_reason]
+            tags = [*tags, "hard:walkout_guard"]
 
         # 硬规则 3：对手 ≤2 张而我在跟牌 → 必须拦
         if low_opponents and to_beat is not None:
             target = min(low_opponents, key=lambda s: counts[s])
             reasons = [reason_must_block(seat_label(target, seat), counts[target]), *reasons]
             tags = [*tags, "hard:must_block"]
+        if overtake_reason is not None:
+            # 压在"必须拦"前面：界面上先要回答的是"为什么压自己队友"
+            reasons = [overtake_reason, *reasons]
+            tags = [*tags, "hard:overtake_partner"]
         elif not low_opponents and to_beat is not None and best_score < 0:
             # 跟牌且所有能压的牌都亏 → 不出（score(pass) = 0）
             reason = (

@@ -1,4 +1,4 @@
-"""启发式 agent：五条硬规则逐条，加打分项的合理性。"""
+"""启发式 agent：六条硬规则逐条，加打分项的合理性。"""
 
 from __future__ import annotations
 
@@ -333,3 +333,98 @@ def test_every_recommendation_carries_a_reason(agent):
         candidate = agent.act(state)
         assert candidate.reasons, f"没有理由：{hand}"
         assert all(isinstance(text, str) and text for text in candidate.reasons)
+
+# --------------------------------------------------------------------- 硬规则 6：别送对手一把走完
+#
+# 下面两个局面是从真实对局库（2026-10-05 ~ 10-07，120 局）里 `ddz.tools.review` 抓出来的
+# "求解器证明能赢、实际却打丢"的两处，牌 id 原样照抄。对局库本身不入库（gitignore），
+# 所以这里把局面写死；求解器现场重算，不写死结论。
+
+#: 局 31971 第 54 手：0 号[农民] 3 5 7 9 J、1 号[地主] Q、2 号[农民·我] 3 3 4 4 5 5 10 Q，我领出
+REPLAY_31971 = [(0, 9, 18, 25, 35), (38,), (2, 3, 5, 6, 10, 11, 31, 37)]
+
+#: 局 32080 第 32 手：0 号[农民·我] 3 3 3 4 4 7 9 9 K A 2、1 号[地主] 9、2 号[农民] A（刚领出单张 4）
+REPLAY_32080 = [(0, 1, 3, 5, 7, 18, 24, 27, 42, 47, 48), (25,), (44, 6)]
+
+
+def _replayed(hands, **kwargs):
+    from ddz.state import from_platform_state
+    from helpers import complete_payload
+
+    return from_platform_state(complete_payload(hands, **kwargs))
+
+
+def _solver_best(state):
+    from ddz.engine.endgame import Limits, solve, solvable
+    from ddz.tools.eval_records import action_key
+
+    limits = Limits(time_budget_ms=5000.0, rank_budget_ms=1000.0)
+    assert solvable(state, limits), "复盘出来的残局应当算得清"
+    solved = solve(state, limits=limits)
+    assert solved.proved and solved.winning, "这两局当时都是我方必胜"
+    return {None if m is None else action_key(m.cards) for m in (solved.best_moves or [])}
+
+
+def test_lead_does_not_hand_a_one_card_opponent_the_win():
+    """真实对局 31971：地主只剩 1 张（Q），旧版领单张 10 → 他 Q 走完，必胜局变输。"""
+    from ddz.tools.eval_records import action_key
+
+    state = _replayed(REPLAY_31971, turn=2, landlord=1)
+    best = _solver_best(state)
+
+    fixed = HeuristicAgent().act(state)
+    assert action_key(fixed.move.cards) in best, f"领 {C.format_cards(fixed.move.cards)} 不在必胜集合里"
+    assert "hard:walkout_guard" in fixed.tags
+
+    old = HeuristicAgent(Weights(walkout_guard=False)).act(state)
+    assert action_key(old.move.cards) not in best, "对照：关掉规则 6 就该复现当初那手败着"
+    assert old.move.cards == (31,), "当初打的是单张 10"
+
+
+def test_overtakes_partner_when_the_opponent_would_walk_out():
+    """真实对局 32080：队友 1 张 A 领单张 4、地主 1 张 9 在我下家——放行就是让地主 9 走完。"""
+    from ddz.tools.eval_records import action_key
+
+    state = _replayed(REPLAY_32080, turn=0, landlord=1, to_beat=reading("4"),
+                      last_seat=2, play_cards=[6])
+    best = _solver_best(state)
+
+    fixed = HeuristicAgent().act(state)
+    assert not fixed.is_pass, "这里绝不能放行"
+    assert action_key(fixed.move.cards) in best
+    assert "hard:overtake_partner" in fixed.tags and "hard:walkout_guard" in fixed.tags
+    assert "必须先抢下来" in fixed.reasons[0]
+
+    old = HeuristicAgent(Weights(walkout_guard=False)).act(state)
+    assert old.is_pass and "hard:partner_low" in old.tags, "对照：关掉规则 6 就复现当初的放行"
+
+
+def test_partner_low_rule_still_holds_when_no_opponent_is_close():
+    """对手还有一大把牌时，"队友 ≤2 张绝不压"照旧是铁律（规则 6 不该改变它）。"""
+    state = game_state("3 4 5 6 7 8 9", to_beat=reading("3"), last_seat=2, counts=[7, 9, 1])
+    candidate = HeuristicAgent().act(state)
+    assert candidate.is_pass and "hard:partner_low" in candidate.tags
+
+
+def test_lead_guard_is_knowledge_free():
+    """看不见别家的牌也成立：对手只剩 1 张时，手里有对子就不该领单张（1 张牌压不过对子）。"""
+    state = game_state("3 3 4 5 6 7", counts=[6, 1, 9], landlord=1)   # 我领出，下家只剩 1 张
+    candidate = HeuristicAgent().act(state)
+    assert len(candidate.move.cards) > 1, f"领了 {C.format_cards(candidate.move.cards)}：单张会被他一把压过"
+    assert "hard:walkout_guard" in candidate.tags
+
+
+def test_lead_guard_falls_back_to_the_biggest_single():
+    """全是单张可领时，领最大的那张——赌他手里那张更小（总比领最小的送他走要好）。"""
+    state = game_state("3 7 K", counts=[3, 1, 9], landlord=1)
+    candidate = HeuristicAgent().act(state)
+    assert candidate.move.cards == (cards_of("K")[0],)
+    assert "赌他压不过" in candidate.reasons[-1]
+
+
+def test_lead_guard_leaves_a_two_card_opponent_alone_on_singles():
+    """对手剩 2 张时，单张不是一把手走完的牌型（他压过还剩 1 张）；该避开的是对子。"""
+    pair_risk = game_state("3 3 5 7 9", counts=[5, 2, 9], landlord=1)
+    candidate = HeuristicAgent().act(pair_risk)
+    assert len(candidate.move.cards) != 2 or candidate.move.pattern.type != P.PAIR, \
+        "对手剩 2 张时不该领对子：他一对压过来就走完了"

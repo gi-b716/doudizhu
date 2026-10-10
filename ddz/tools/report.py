@@ -57,6 +57,10 @@ def _brief(panel: dict | None) -> str | None:
         text += f"+{panel['auto_passes']}不出"
     if panel.get("hosted"):
         text += f" / ※托管 {panel['hosted']}"
+    # 0.7.5 起浮窗会点「取消托管」把控制权要回来：要回来几次也记，否则复盘时
+    # 分不清"这局是机器人替我们打的"还是"我们自己打回来的"。
+    if panel.get("hosting_cancels"):
+        text += f"（要回 {panel['hosting_cancels']}）"
     return f"{text} / {panel.get('engine', '?')}"
 
 
@@ -71,6 +75,7 @@ def summarize(records: list[GameRecord], *, recent: int = 20) -> dict:
     buckets: dict[tuple[str, int], list[int]] = defaultdict(list)
     bids: Counter = Counter()
     panel_games = plays = passes = passes_known = panel_mine = solver_uses = 0
+    hosting_cancels = 0
     dec_plays = dec_passes = 0
     hosted: list[tuple[str, int]] = []
     rows: list[dict] = []
@@ -105,6 +110,7 @@ def summarize(records: list[GameRecord], *, recent: int = 20) -> dict:
             panel_mine += _my_actions(record)
             if panel.get("hosted"):
                 hosted.append((str(record.game_id), panel["hosted"]))
+            hosting_cancels += panel.get("hosting_cancels") or 0
 
         rows.append({
             "at": record.captured_at, "game_id": str(record.game_id), "delta": delta,
@@ -136,7 +142,8 @@ def summarize(records: list[GameRecord], *, recent: int = 20) -> dict:
         "panel": {"games": panel_games, "plays": plays, "passes": passes,
                   "passes_known": passes_known, "dec_plays": dec_plays,
                   "dec_passes": dec_passes, "mine": panel_mine,
-                  "solver": solver_uses, "hosted": hosted},
+                  "solver": solver_uses, "hosted": hosted,
+                  "hosting_cancels": hosting_cancels},
         "recent": rows[-recent:] if recent else [],
         "span": (rows[0]["at"], rows[-1]["at"]) if rows else (None, None),
     }
@@ -203,6 +210,8 @@ def report(records: list[GameRecord], *, recent: int = 20, source: str = "") -> 
         for gid, n in p["hosted"]:
             # 用 ※ 不用 ⚠：Windows 控制台默认 GBK，⚠(U+26A0) 不在 GBK 里，print 会直接崩
             out.append(f"       ※ 局 {gid} 被平台托管 {n} 次——那几手是平台自己的机器人在打")
+        if p["hosting_cancels"]:
+            out.append(f"       其中 {p['hosting_cancels']} 次被浮窗点「取消托管」要了回来（0.7.5 起）")
     else:
         out.append("浮窗   （还没有带自述的对局：脚本要 0.6.0 以上）")
     out.append("")

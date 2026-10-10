@@ -192,6 +192,7 @@ score(pass) = 0；默认权重 W_RED=3.0 W_COST=0.30 W_CTRL=1.6 W_SPLIT=0.9 W_BO
 ```
 
 - **硬规则覆盖**（同名单测，不参与打分）：无牌可管→不出；能一把走完→立刻走；地主对 ≤2 张的农民必须拦（拦不住则警告）；上家是队友→默认放行（除非我能一波走完 / 队友>6 张而我显著更少需接管倒牌 / 队友≤2 张绝不压）；炸弹纪律（只用于赢牌、拦 ≤2 张对手、或评分显著占优，绝不炸队友）。
+- **第 6 条：队友快走不动了就得自己拦**（`Weights.walkout_guard`，2026-10-10 按真实归档加）。"放队友走"的前提是他能接手——他出的是小单张/小对子（≤10）、地主手里还有 ≤10 的牌能压过去、而我压得住时，放他等于白送地主一手先手，必须自己拦；拦不住才退回让路。同一条也放宽了"绝不压只剩 1–2 张的队友"：**队友自己就快被走掉时**可以压过他，把出牌权抢到自己手里。
 - `bidding.py`：`hand_strength = 2.2·#王 + 1.4·#2 + 0.8·#A + 3.0·#炸 + 4.0·王炸 + (17 − 3.2·手数) + 0.5·顺子加成` → 阈值映射 0..3 后夹取到合法集；`must_bid` 强制 ≥1，理由「已连续流局，本轮必须叫分」。阈值分**两档**（`bidding.py`）：宽档 `THRESHOLDS=(-2,2,6)` 是库/竞技场默认，严档 `CONSERVATIVE_THRESHOLDS=(4,8,12)` 是产品（浮窗/服务）默认，`DEFAULT_BID_TIER='strict'`、`tier_of/tier_label/thresholds_of_tier` 是档位命名的唯一出处。方向由期望收益定：地主期望 ≈ `2·叫分·倍数·(2P−1)`，符号只由地主胜率 P 决定，而这个打法下 P 长期低于 0.5（宽档自对弈地主只赢 43%，自愿叫 1、2 分的地主更是只赢 34% / 39%），所以"少当地主"就是省钱。换阈值用 `ddz.tools.bid_ab`（配对种子 + 角色×底分切分）。
 - `endgame.py`：触发条件 `sum(counts) ≤ 16 且 我 ≤ 8 张 且 |unseen| ≤ 10`；状态打包成单个 int 记忆化（三家 15 位五进制计数向量拼接 + turn + to_beat 小 id）；α-β、走完优先排序、赢得更快优先；**暗牌**：对手牌多重集已知、拆分未知 → ≤64 种确定化（小局面全枚举，否则有种子采样），取各拆分最差值（悲观）；全部拆分都输时返回「劣势局面，尽量拖延」并给最长存活着法；任何异常/超时静默回退启发式。
 
@@ -246,7 +247,7 @@ score(pass) = 0；默认权重 W_RED=3.0 W_COST=0.30 W_CTRL=1.6 W_SPLIT=0.9 W_BO
 - 捕获：包装 `window.fetch`，命中 `/games/doudizhu/api` 时 `r.clone().json()` 异步旁路（**绝不改写请求/响应**）；`DOMContentLoaded` 读 `#ddz-initial` 兜底首屏。
 - 分发：`data.state` → `accept()`；`finished` → `/ingest` 一次（按 version 去重）并停更建议；`turn===seat 且未终局` → 防抖 150ms 调 `/advise`（同一时刻最多一个在飞，旧响应按 version 丢弃）；否则显示「等待 X 出牌…」并把旧面板置灰。换局是整页跳转，脚本随页面重建；session 存 `sessionStorage`。
 - 浮窗：`fixed` 右下、可拖拽/折叠（localStorage 持久化）、Shadow DOM 自带样式；内容 = 轮次横幅、推荐牌（同源 `<img src="/images/games/doudizhu/<id>.webp">`）、中文描述、备选 1–3、理由 bullets、记牌器、威胁提示、页脚 `douzero:WP · cuda · 48ms`。
-- `帮我选中`（**默认关闭、绝不点出牌/绝不调 API**）：先向 `.ddz-table` 派发 `contextmenu` 清空选择 → 对每张建议牌派发 `pointerdown`+`pointerup`（`{bubbles, cancelable, pointerId:0, button:0}`）→ 每轮 `await requestAnimationFrame` 并**重新查询** `#ddz-hand .ddz-card[data-card="<id>"]`（页面会整体重建节点）；仅当本地状态 `playing && turn===seat` 且手牌 DOM 存在时执行。
+- `帮我选中`（**默认关闭、绝不点出牌/绝不调 API**）：先向 `.ddz-table` 派发 `contextmenu` 清空选择 → 对每张建议牌派发 `pointerdown`+`pointerup`（`{bubbles, cancelable, pointerId:0, button:0}`）→ 每轮等一帧并**重新查询** `#ddz-hand .ddz-card[data-card="<id>"]`（页面会整体重建节点）；仅当本地状态 `playing && turn===seat` 且手牌 DOM 存在时执行。等一帧**不能只用 `requestAnimationFrame`**：后台标签页里它一次都不触发，点击序列会永远停在第一张牌上（平台 15/30 秒计时走完就把我们托管，整局交给平台机器人），所以要 rAF 与兜底 `setTimeout` 谁先到算谁，并由 `tests/test_userscript_nextframe.py` 钉住。
 
 ### 3.7 评测
 
