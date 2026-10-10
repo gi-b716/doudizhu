@@ -15,7 +15,7 @@ from __future__ import annotations
 from ..engine.base import Bid, Candidate
 from ..engine.endgame import (
     DEFAULT_LIMITS, Limits, candidate_from, solve as endgame_solve,
-    solvable as endgame_solvable,
+    solve_uncertain, solvable as endgame_solvable, uncertain_solvable,
 )
 from ..engine.heuristic import HeuristicAgent
 from ..explain import reason_solver_lost
@@ -36,12 +36,19 @@ class EndgameAgent:
         self.solved = 0
         self.proved_wins = 0
         self.proved_losses = 0
+        #: 多少结论是"看不见手牌也算出来"的（实盘那种）
+        self.blind_wins = 0
 
     def act(self, state: GameState) -> Candidate:
-        if not endgame_solvable(state, self.limits):
-            return self.fallback.act(state)
-
-        result = endgame_solve(state, limits=self.limits)
+        if state.all_hands is None:
+            # **真实对局就是这样**：只看得到自己的牌。走"对一切可能的分配都赢"那条路。
+            if not uncertain_solvable(state, self.limits):
+                return self.fallback.act(state)
+            result = solve_uncertain(state, limits=self.limits)
+        else:
+            if not endgame_solvable(state, self.limits):
+                return self.fallback.act(state)
+            result = endgame_solve(state, limits=self.limits)
         if not result.proved:
             # 没搜完就当没这个功能（绝不拿半截结论下结论）
             return self.fallback.act(state)
@@ -49,6 +56,8 @@ class EndgameAgent:
         self.solved += 1
         if result.winning:
             self.proved_wins += 1
+            if state.all_hands is None:
+                self.blind_wins += 1
             return candidate_from(result)
 
         # 必败：着法照旧尽量打，但结论要说实话——玩家可以改为等对方失误

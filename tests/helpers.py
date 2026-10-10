@@ -219,3 +219,50 @@ def platform_endgame(hands, *, turn=0, landlord=1, to_beat=None, last_seat=None,
         "log": log,
         "last": last,
     }
+
+
+def complete_payload(hands, *, turn=0, landlord=1, to_beat=None, last_seat=None,
+                     play_cards=(), version=7):
+    """像 :func:`platform_endgame`，但**补齐 54 张的归属**（真实对局就是这样）。
+
+    为什么必须补：真实对局里每张牌都在某个人手里或已经打出，所以"未见牌"正好等于两家的手牌
+    （残局求解的"不确定信息"那条路依赖这个等式）。手搓的 state 只有几张牌在场、其余"还在盒子里"，
+    求解器会算出五十几张未见牌从而拒绝求解——那是**正确的**拒绝，不是 bug。
+    这里把多出来的牌记成 0 号位已打出，等式就成立了。
+    """
+    from ddz import cards as C
+
+    payload = platform_endgame(hands, turn=turn, landlord=landlord, to_beat=to_beat,
+                               last_seat=last_seat, play_cards=play_cards, version=version)
+    used = set()
+    for hand in payload["hands"]:
+        used |= set(hand)
+    if payload["hand"]:
+        used |= set(payload["hand"])
+    played = payload["last"]["cards"] if payload["last"] else []
+    used |= set(played)
+    leftovers = [card for card in C.full_deck() if card not in used]
+    if leftovers:
+        seat = (landlord + 1) % 3
+        payload["log"] = [*payload["log"], {"kind": "play", "seat": seat, "cards": leftovers}]
+    return payload
+
+
+def platform_bidding(hand, *, seat=0, bids=(None, None, None), version=3):
+    """叫分阶段的平台 state（服务层测叫分选项用）。"""
+    cards = sorted(cards_of(hand) if isinstance(hand, str) else list(hand))
+    return {
+        "version": version,
+        "seat": seat,
+        "phase": "bidding",
+        "turn": seat,
+        "hand": list(cards),
+        "hands": None,
+        "players": [
+            {"username": f"p{i}", "count": 17 if i != seat else len(cards),
+             "bid": bids[i], "role": None}
+            for i in range(3)
+        ],
+        "log": [],
+        "last": None,
+    }

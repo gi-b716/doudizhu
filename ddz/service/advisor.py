@@ -31,22 +31,25 @@ from typing import Any, Mapping
 
 from .. import __version__
 from ..agents.registry import make
+from ..cards import action_key
 from ..counter import counter_snapshot, threats
 from ..engine.base import Candidate
 from ..engine.endgame import (
-    SolveResult, candidate_from as solver_candidate, solve as endgame_solve,
-    solvable as endgame_solvable,
+    DEFAULT_LIMITS, Limits, SolveResult, candidate_from as solver_candidate,
+    solve as endgame_solve, solve_uncertain as endgame_solve_uncertain,
+    solvable as endgame_solvable, uncertain_solvable,
 )
 from ..explain import (
     describe_move, reason_disagree, reason_solver_lost, reason_solver_pass, reason_solver_win,
 )
 from ..data.archive import Archive
 from ..engine.base import Agent, Candidate
-from ..engine.heuristic import analyze_hand
+from ..engine.heuristic import HeuristicAgent, analyze_hand
 from ..explain import describe_move
 from ..record import from_finished_state
 from ..state import (
-    PHASE_BIDDING, PHASE_FINISHED, GameState, StateParseError, from_platform_state,
+    PHASE_BIDDING, PHASE_FINISHED, SEATS, GameState, StateParseError, from_platform_state,
+    unwrap_state,
 )
 
 __all__ = ["AdviseOptions", "Advisor", "Session"]
@@ -67,6 +70,9 @@ class AdviseOptions:
     top_k: int = 3
     deadline_ms: int = 400
     for_seat: int | None = None
+    #: 叫分档位：``loose``（宽，叫得勤）或 ``strict``（严，默认）。写法很宽松——
+    #: 旧脚本发的 ``safe`` / ``conservative`` 一样认，见 :func:`ddz.engine.bidding.tier_of`。
+    bid: str = "strict"
 
     @classmethod
     def from_payload(cls, payload: Mapping[str, Any] | None) -> "AdviseOptions":
@@ -77,6 +83,7 @@ class AdviseOptions:
             top_k=int(data.get("top_k") or 3),
             deadline_ms=int(data.get("deadline_ms") or 400),
             for_seat=None if for_seat is None else int(for_seat),
+            bid=str(data.get("bid") or "strict"),
         )
 
 
@@ -89,7 +96,6 @@ class Session:
     state: GameState | None = None
     cache: dict[tuple[int, int, str], dict] = field(default_factory=dict)
     seen_at: float = 0.0
-
     def reset(self, game_id: str | None = None) -> None:
         """换局：丢掉上一局的局面与**全部**缓存（version 跨局会重来，缓存必须一起清）。"""
         self.game_id = game_id
@@ -126,6 +132,10 @@ class Advisor:
         deadline_ms: int = 400,
         workers: int = 2,
         strict_timeout: bool = False,
+        endgame_mode: str = "ondemand",
+        endgame_budget_ms: float = 250.0,
+        rank_budget_ms: float = 50.0,
+        max_unseen: int = 8,
     ) -> None:
         self.archive = archive if archive is not None else Archive()
         self.default_agent = default_agent
@@ -135,6 +145,27 @@ class Advisor:
         self.default_top_k = top_k
         self.default_deadline_ms = deadline_ms
         self.strict_timeout = strict_timeout
+        #: 残局求解的模式（服务启动参数决定，浮窗只显示）：
+        #: - ``ondemand``：轮到我时按需求解（默认）
+        #: - ``off``：完全不用求解器
+        #:
+        #: 曾经有过第三种 ``prefetch``（趁对家思考在后台预取 + 记忆表跨回合复用）。**已删掉**：
+        #: 实测它在实盘买不到东西（800 局里只改变 2 局）——预取是为"完美信息下深搜"建的，
+        #: 而真实对局看不到别家手牌，那条路根本走不到。留一层复杂度换 0 收益不值得。
+        self.endgame_mode = endgame_mode if endgame_mode in ("ondemand", "off") else "ondemand"
+        #: 我方回合求解的时间上限（毫秒）——**这是唯一会加到出建议延迟上的量**
+        self.endgame_budget_ms = endgame_budget_ms
+        #: 看不见别家手牌时，"未见牌"最多几张才去枚举所有分配
+        self.max_unseen = max_unseen
+        #: 结论已经在手、只差挑哪一手时额外给的时间（挑着法比求值便宜得多）
+        self.rank_budget_ms = rank_budget_ms
+        #: 求解器的记账：一眼看出它到底在什么时候干活、花了多少
+        self.endgame_stats = {
+            "solves": 0, "proved": 0, "exhausted": 0, "solve_ms": 0.0, "solves_uncertain": 0,
+            #: **两个跳过原因要分开记**：牌太多是正常的；"看不到三家手牌"意味着平台没下发
+            #: 别家的牌——那求解器在真实对局里就一次都跑不起来（这条是被真实对局的复盘逼出来的）
+            "skipped_gate": 0, "skipped_no_hands": 0,
+        }
         self.started_at = time.time()
         self.records: int | None = None
         self._sessions: dict[str, Session] = {}
@@ -226,9 +257,11 @@ class Advisor:
         if wanted.startswith("douzero") and wanted not in self._agents:
             # Phase 4：权重/上游代码就位并 register 之后，这里就会返回真 agent
             return None, wanted
-        if wanted not in self._agents:
-            self._agents[wanted] = make(wanted)
-        return self._agents[wanted], self._agents[wanted].name
+        agent = self._agents.get(wanted)
+        if agent is None:
+            # 只读一次字典：复盘页可能同时在点好几手，别让"读两次"变成两个 agent
+            agent = self._agents[wanted] = make(wanted)
+        return agent, agent.name
 
     @staticmethod
     def _engine_info(agent: Any, name: str, *, fallback: bool = False) -> dict:
@@ -314,7 +347,7 @@ class Advisor:
         deadline = max(0.05, (options.deadline_ms or self.default_deadline_ms) / 1000.0)
         agent_ms = 0.0
         fallback = False
-        solved, solve_ms = self._solve_endgame(view)
+        solved, solve_ms = self._solve_endgame(session, view)
         if solved is not None and solved.winning:
             # 残局且算得出**必胜**：直接用求解器的着法，不必再问模型——
             # 完美信息下搜到底的结论，比任何估值都硬。
@@ -350,7 +383,8 @@ class Advisor:
                 "tags": list(candidate.tags),
             },
             "solver": _solver_payload(solved, solve_ms),
-            "disagreement": self._disagreement(view, name, candidate),
+            "hands_visible": view.all_hands is not None,
+            "disagreement": self._disagreement(view, agent, name, candidate, solved),
             "timing_ms": {
                 **base["timing_ms"],
                 "agent": round(agent_ms, 3),
@@ -361,43 +395,131 @@ class Advisor:
         session.remember(cache_key, result)
         return result
 
-    def _solve_endgame(self, view: GameState) -> tuple[SolveResult | None, float]:
-        """残局能算就算。看不到三家手牌、或牌还太多，就返回 ``None``（不猜）。"""
-        if not endgame_solvable(view):
+    def _solve_endgame(self, session: Session, view: GameState) -> tuple[SolveResult | None, float]:
+        """残局能算就算；算不了就返回 ``None``（不猜）。
+
+        两条路：手牌全看得见时是完美信息搜索；**真实对局看不到别家手牌**，走的是
+        "对一切可能的分配都赢"那条（门槛按未见牌张数卡）。
+        """
+        if self.endgame_mode == "off":
             return None, 0.0
         started = time.perf_counter()
-        result = endgame_solve(view)
-        return result, (time.perf_counter() - started) * 1000.0
+        if view.all_hands is not None:
+            # 手牌全看得见（管理员/复盘/竞技场）：完美信息下搜到底
+            limits = self.endgame_limits()
+            if not endgame_solvable(view, limits):
+                self.endgame_stats["skipped_gate"] += 1
+                return None, 0.0
+            result = endgame_solve(view, limits=limits)
+        else:
+            # 真实对局就是这样：只看得到自己的牌。改用"对一切可能的分配都赢"那条路，
+            # 门槛按**未见牌张数**卡（真正该卡的是不确定性，不是牌数）。
+            limits = self.uncertain_limits()
+            if not uncertain_solvable(view, limits):
+                self.endgame_stats["skipped_no_hands"] += 1
+                return None, 0.0
+            result = endgame_solve_uncertain(view, limits=limits)
+            self.endgame_stats["solves_uncertain"] += 1
+        elapsed = (time.perf_counter() - started) * 1000.0
+        stats = self.endgame_stats
+        stats["solves"] += 1
+        stats["solve_ms"] += elapsed
+        stats["proved" if result.proved else "exhausted"] += 1
+        return result, elapsed
 
-    def _disagreement(self, view: GameState, name: str, candidate: Candidate) -> dict | None:
-        """**策略分歧**（PLAN §3.4）：选了 DouZero 时，让启发式也看一眼，首选不一致就摆出来。
+    def endgame_limits(self) -> Limits:
+        """**手牌全看得见**时用的门槛与预算（管理员账号、复盘、竞技场）。
 
-        两个引擎给出的着法不同，不等于有一个是错的——但值得让人看见，好自己判断。
-        求解器已经算过（proved）的着法不参与比较：那个是结论，不是意见。
+        门槛卡张数、预算卡时间：它直接加在出建议的延迟上，所以两个都要抠。
         """
-        if not name.startswith("douzero") or "solver" in candidate.tags:
-            return None
+        return Limits(
+            time_budget_ms=self.endgame_budget_ms,
+            rank_budget_ms=self.rank_budget_ms,
+        )
+
+    def uncertain_limits(self) -> Limits:
+        """**看不见别家手牌**时用的门槛与预算：按"未见牌张数"卡。"""
+        return Limits(
+            max_unseen=self.max_unseen, max_nodes=limits_max_nodes(),
+            time_budget_ms=self.endgame_budget_ms, rank_budget_ms=self.rank_budget_ms,
+        )
+
+    def endgame_status(self) -> dict:
+        """给 ``/health`` 与浮窗看的一眼状态。
+
+        **``stats`` 是用来回答"会不会一直在用求解器"的**：``skipped`` 涨、``solves`` 不涨
+        就说明大部分局面压根没进求解器；``solve_ms`` 是累计加在建议上的时间。
+        """
+        stats = dict(self.endgame_stats)
+        if stats["solves"]:
+            stats["solve_ms"] = round(stats["solve_ms"], 1)
+            stats["avg_ms"] = round(stats["solve_ms"] / stats["solves"], 2)
+        return {
+            "mode": self.endgame_mode,
+            "endgame_budget_ms": self.endgame_budget_ms,
+            "gate_cards": self.endgame_limits().max_total,
+            "max_unseen": self.max_unseen,
+            "stats": stats,
+        }
+
+    def _disagreement(
+        self, view: GameState, agent: Agent | None, name: str,
+        candidate: Candidate, solved: SolveResult | None,
+    ) -> dict | None:
+        """**策略分歧**（PLAN §3.4）：把"另一个意见"摆出来，能判就判它是不是也会输。
+
+        两种情形：
+
+        - **引擎**给的建议 → 拿启发式做对照（PLAN 说的"两个引擎首选不一致"）；
+        - **求解器接管**的建议 → 拿**你选的那个引擎**做对照，并标出那一手在求解器眼里
+          是否也赢。这正是最有用的时刻："DouZero 想打对 10 —— 求解器：那样会输"。
+
+        求解器证明过的局面上，两个引擎的看法不同**不等于有一个是错的**，但值得让人看见
+        ——尤其是求解器能直接判出另一手会不会输的时候。
+        """
+        from_solver = "solver" in candidate.tags
+        if from_solver:
+            other, other_name = agent, name          # 对照你选的那个引擎
+            if other is None:
+                return None
+        else:
+            if not name.startswith("douzero"):
+                return None
+            other, other_name = self.agent_for("heuristic")[0], "heuristic"
         try:
-            other = self.agent_for("heuristic")[0]
             theirs = other.act(view)
-        except Exception:  # 对照物出问题不影响主引擎的建议
+        except Exception:  # 对照物出问题不影响主建议
             return None
+
         mine, other_move = candidate.move, theirs.move
-        if mine is not None and other_move is not None and mine.pattern.key() == other_move.pattern.key():
-            return None
-        if mine is None and other_move is None:
-            return None
+        if action_key(candidate.cards) == action_key(theirs.cards):
+            return None                              # 两个意见其实是同一手，没什么可分歧的
+
+        verdict: bool | None = None
+        if solved is not None and solved.proved:
+            best = {action_key(m.cards) if m is not None else None for m in (solved.best_moves or [])}
+            verdict = action_key(other_move.cards if other_move else None) in best
+            # 必败局面上 best_moves 是空的，于是这里恒为 False —— 那也正是实话（那一手也赢不了）
+
         return {
             "engine": {"cards": list(candidate.cards), "description": describe_move(candidate.move)},
-            "heuristic": {"cards": list(theirs.cards), "description": describe_move(other_move)},
-            "text": reason_disagree(describe_move(other_move)),
+            "other": {
+                "name": other_name, "cards": list(theirs.cards),
+                "description": describe_move(other_move), "winning": verdict,
+            },
+            "text": reason_disagree(other_name, describe_move(other_move), verdict),
         }
 
     # ----------------------------------------------------------------- 叫分与归档
 
     def _bid_advice(self, view: GameState, seat: int, base: dict, options: AdviseOptions, started: float) -> dict:
         # 叫分永远走启发式：DouZero 没有叫分模型，也不认识流局（PLAN §0.2）
-        agent, name = self.agent_for("heuristic")
+        from ..engine.bidding import thresholds_of_tier
+
+        _, name = self.agent_for("heuristic")   # 只是要那个引擎名（响应里要报）
+        # 档位 → 阈值组：**两档都显式给**，不吃 HeuristicAgent 的 None 默认
+        # （库默认是宽档，产品默认是严档，靠默认会静默错一档）
+        agent = HeuristicAgent(thresholds=thresholds_of_tier(options.bid))
         bid = agent.bid(view)
         return {
             **base,
@@ -424,6 +546,7 @@ class Advisor:
         game_id: str | None = None,
         captured_at: float | None = None,
         source: str = "platform",
+        panel: Mapping[str, Any] | None = None,
         seat_of_interest: int | None = None,
         keep_raw: bool = False,
     ) -> dict:
@@ -437,6 +560,7 @@ class Advisor:
                 captured_at=captured_at,
                 source=source,
                 seat_of_interest=seat_of_interest,
+                panel=panel,
             )
         except StateParseError as exc:
             log.warning("归档被拒：%s", exc)
@@ -579,3 +703,18 @@ def _solver_payload(result: SolveResult | None, elapsed_ms: float) -> dict | Non
         "nodes": result.nodes,
         "ms": round(elapsed_ms, 3),
     }
+
+
+def _side_of(view: GameState) -> frozenset[int]:
+    """我方阵营（地主一个人 / 农民两兄弟）——记忆表的键：换边就不能复用。"""
+    landlord = view.landlord
+    me = view.advise_seat
+    if landlord is None or me is None:
+        return frozenset()
+    return frozenset({landlord}) if me == landlord else frozenset(s for s in SEATS if s != landlord)
+
+
+def limits_max_nodes() -> int:
+    from ..engine.endgame import DEFAULT_LIMITS
+
+    return DEFAULT_LIMITS.max_nodes

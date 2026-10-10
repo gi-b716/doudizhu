@@ -1,0 +1,394 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>斗地主 Copilot · 复盘</title>
+<style>
+  :root{--bg:#14171a;--panel:#1d2126;--panel2:#23282e;--line:#33393f;--fg:#e8eaed;
+        --dim:#9aa0a6;--accent:#4ea1ff;--good:#4caf7d;--bad:#e05a5a;--warn:#e0a83c}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+       font:14px/1.55 "Segoe UI","Microsoft YaHei",system-ui,sans-serif}
+  header{padding:12px 16px;border-bottom:1px solid var(--line);background:var(--panel)}
+  header h1{margin:0;font-size:16px;font-weight:600}
+  header h1 span{color:var(--dim);font-weight:400}
+  header .hint{margin:6px 0 0;color:var(--dim);font-size:12px}
+  header .hint b{color:var(--warn)}
+  main{display:grid;grid-template-columns:280px 1fr;gap:0;height:calc(100vh - 74px)}
+  @media (max-width:820px){main{grid-template-columns:1fr;height:auto}}
+  #side{border-right:1px solid var(--line);overflow:auto;background:var(--panel)}
+  .side-head{padding:8px 12px;color:var(--dim);font-size:12px;
+             border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--panel)}
+  .game{padding:8px 12px;border-bottom:1px solid var(--line);cursor:pointer}
+  .game:hover{background:var(--panel2)}
+  .game.on{background:var(--panel2);box-shadow:inset 3px 0 0 var(--accent)}
+  .game .row1{display:flex;justify-content:space-between;gap:8px}
+  .game .id{color:var(--dim);font-variant-numeric:tabular-nums}
+  .game .delta{font-weight:600;font-variant-numeric:tabular-nums}
+  .delta.win{color:var(--good)} .delta.lose{color:var(--bad)}
+  .game .row2{color:var(--dim);font-size:12px;margin-top:2px}
+  #main{overflow:auto;padding:14px 16px 40px}
+  h2{font-size:14px;margin:0 0 8px;color:var(--dim);font-weight:600}
+  .head{display:flex;flex-wrap:wrap;gap:10px;align-items:baseline;margin-bottom:10px}
+  .head .gid{font-size:16px;font-weight:600}
+  .head .meta{color:var(--dim);font-size:12px}
+  .seats{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+  @media (max-width:820px){.seats{grid-template-columns:1fr}}
+  .seat{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:8px 10px}
+  .seat.turn{border-color:var(--accent)}
+  .seat .who{display:flex;justify-content:space-between;gap:6px;margin-bottom:6px;font-size:12px}
+  .seat .name{font-weight:600}
+  .tag{border:1px solid var(--line);border-radius:4px;padding:0 5px;color:var(--dim);font-size:11px}
+  .tag.landlord{color:var(--warn);border-color:var(--warn)}
+  .tag.me{color:var(--accent);border-color:var(--accent)}
+  .cards{display:flex;flex-wrap:wrap;gap:3px;min-height:22px}
+  .card{background:#f4f5f7;color:#15181b;border-radius:4px;padding:1px 5px;
+        font-size:12px;font-weight:600;font-variant-numeric:tabular-nums}
+  .card.red{color:#c0392b}
+  .card.dim{opacity:.45}
+  .trick{margin-top:12px;background:var(--panel);border:1px solid var(--line);
+         border-radius:8px;padding:8px 10px}
+  .trick .line{display:flex;gap:8px;align-items:center;margin:3px 0;font-size:13px}
+  .trick .line .k{color:var(--dim);min-width:64px}
+  .next{margin-top:10px;color:var(--dim);font-size:13px}
+  .next b{color:var(--fg)}
+  .nav{display:flex;gap:8px;align-items:center;margin:12px 0 4px}
+  button{background:var(--panel2);color:var(--fg);border:1px solid var(--line);
+         border-radius:6px;padding:4px 10px;cursor:pointer;font:inherit;font-size:13px}
+  button:hover{border-color:var(--accent)}
+  button:disabled{opacity:.45;cursor:default}
+  input[type=range]{flex:1;accent-color:var(--accent)}
+  .log{margin-top:14px;border-top:1px solid var(--line);padding-top:10px}
+  .ev{display:flex;gap:8px;padding:3px 6px;border-radius:5px;cursor:pointer;font-size:13px}
+  .ev:hover{background:var(--panel2)}
+  .ev.on{background:var(--panel2);box-shadow:inset 2px 0 0 var(--accent)}
+  .ev .n{color:var(--dim);min-width:34px;text-align:right;font-variant-numeric:tabular-nums}
+  .ev .hit{color:var(--accent);font-size:11px}
+  .verdict{margin:14px 0 10px;padding:8px 12px;border-radius:8px;
+           border:1px solid var(--line);background:var(--panel);font-weight:600}
+  .verdict.held{color:var(--good);border-color:var(--good)}
+  .verdict.threw_win{color:var(--bad);border-color:var(--bad)}
+  .verdict.lose{color:var(--dim)}
+  .verdict.unknown,.verdict.not_solvable{color:var(--dim);font-weight:400}
+  table.cmp{width:100%;border-collapse:collapse;background:var(--panel);
+            border:1px solid var(--line);border-radius:8px;overflow:hidden}
+  table.cmp th,table.cmp td{padding:7px 10px;text-align:left;vertical-align:top;
+                            border-bottom:1px solid var(--line);font-size:13px}
+  table.cmp th{color:var(--dim);font-weight:600;font-size:12px;width:110px}
+  table.cmp tr:last-child td,table.cmp tr:last-child th{border-bottom:0}
+  .why{color:var(--dim);font-size:12px}
+  .muted{color:var(--dim)}
+  #msg{padding:10px 16px;color:var(--warn)}
+  #msg:empty{display:none}
+  .loading{color:var(--dim);padding:6px 0}
+</style>
+</head>
+<body>
+<header>
+  <h1>斗地主 Copilot <span>· 复盘</span></h1>
+  <p class="hint">归档里三家手牌是全的——所以这里的求解器结论是<b>完美信息</b>下的：它只说明
+    "这局本来能不能赢"，不代表当时算得出来（实盘看不到别家手牌）。</p>
+</header>
+<div id="msg"></div>
+<main>
+  <aside id="side">
+    <div class="side-head">对局 <span id="count"></span></div>
+    <div id="list"></div>
+  </aside>
+  <section id="main">
+    <div id="board"><p class="muted">左边选一局。也可以在对局页点浮窗的「复盘」直接跳过来。</p></div>
+    <div id="analysis"></div>
+  </section>
+</main>
+<script>
+'use strict';
+const RANKS = ['3','4','5','6','7','8','9','10','J','Q','K','A','2','小王','大王'];
+const rankOf = (id) => id < 52 ? (id >> 2) : 13 + (id - 52);
+const isRed = (id) => id < 52 && (id & 3) === 1;
+const cardName = (id) => RANKS[rankOf(id)];
+const ENGINE_NAMES = {'heuristic': '启发式', 'douzero:WP': 'DouZero'};
+
+let GAMES = [], GAME = null, ANALYZABLE = new Map(), CACHE = new Map(), AT = -1;
+
+function el(tag, cls, text) {
+  const node = document.createElement(tag);
+  if (cls) node.className = cls;
+  if (text !== undefined && text !== null) node.textContent = text;
+  return node;
+}
+async function api(path) {
+  const res = await fetch(path, {cache: 'no-store'});
+  return res.json();
+}
+function cardChip(id, dim) {
+  const node = el('span', 'card' + (isRed(id) ? ' red' : '') + (dim ? ' dim' : ''), cardName(id));
+  return node;
+}
+function cardRow(cards) {
+  const box = el('div', 'cards');
+  (cards || []).forEach((id) => box.append(cardChip(id)));
+  if (!cards || !cards.length) box.append(el('span', 'muted', '—'));
+  return box;
+}
+function fmtTime(ts) {
+  const d = new Date((ts || 0) * 1000);
+  const p = (n) => String(n).padStart(2, '0');
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+/* ------------------------------------------------------------------ 对局列表 */
+function renderList() {
+  const box = document.getElementById('list');
+  box.replaceChildren();
+  document.getElementById('count').textContent = GAMES.length ? `（${GAMES.length}）` : '';
+  if (!GAMES.length) { box.append(el('div', 'game muted', '还没有归档的对局')); return; }
+  GAMES.forEach((g) => {
+    const row = el('div', 'game');
+    row.dataset.id = g.game_id;
+    const r1 = el('div', 'row1');
+    r1.append(el('span', 'id', `${fmtTime(g.at)} · ${g.game_id}`));
+    r1.append(el('span', 'delta ' + (g.delta > 0 ? 'win' : g.delta < 0 ? 'lose' : ''), `${g.delta > 0 ? '+' : ''}${g.delta}`));
+    const r2 = el('div', 'row2', `${g.role} · 底${g.base}×${g.multiplier}` + (g.hosted ? ` · 托管${g.hosted}次` : ''));
+    row.append(r1, r2);
+    row.onclick = () => openGame(g.game_id);
+    box.append(row);
+  });
+  markCurrentGame();
+}
+function markCurrentGame() {
+  document.querySelectorAll('.game').forEach((n) =>
+    n.classList.toggle('on', GAME && n.dataset.id === GAME.game_id));
+}
+
+/* -------------------------------------------------------------------- 牌谱 */
+function renderBoard() {
+  const box = document.getElementById('board');
+  box.replaceChildren();
+  if (!GAME) return;
+  const res = GAME.result || {};
+  const head = el('div', 'head');
+  head.append(el('span', 'gid', `第 ${GAME.game_id} 局`));
+  const meta = [fmtTime(GAME.captured_at)];
+  if (res.base) meta.push(`底分 ${res.base} × 倍数 ${res.multiplier}`);
+  if (res.deltas && GAME.my_seat !== null && GAME.my_seat !== undefined) {
+    const mine = res.deltas[GAME.my_seat];
+    meta.push(`我 ${mine > 0 ? '+' : ''}${mine} 分`);
+  }
+  if (res.landlord_won !== undefined) meta.push(res.landlord_won ? '地主赢' : '农民赢');
+  head.append(el('span', 'meta', meta.join(' · ')));
+  head.append(el('span', 'meta', GAME.panel_summary));
+  box.append(head);
+
+  const frame = GAME.frames[AT];
+  const seats = el('div', 'seats');
+  GAME.players.forEach((name, seat) => {
+    const card = el('div', 'seat' + (frame.turn === seat ? ' turn' : ''));
+    const who = el('div', 'who');
+    const left = el('span', 'name', `${seat} 号位 ${name || ''}`);
+    const tags = el('span');
+    if (frame.landlord === seat) tags.append(el('span', 'tag landlord', '地主'));
+    else if (frame.landlord !== null && frame.landlord !== undefined) tags.append(el('span', 'tag', '农民'));
+    if (seat === GAME.my_seat) tags.append(el('span', 'tag me', '我'));
+    tags.append(el('span', 'tag', `${frame.counts[seat]} 张`));
+    who.append(left, tags);
+    card.append(who, cardRow(frame.hands[seat]));
+    seats.append(card);
+  });
+  box.append(seats);
+
+  // 桌面：这一轮每家最后出的牌
+  const trick = el('div', 'trick');
+  (frame.table || []).forEach((entry, seat) => {
+    const line = el('div', 'line');
+    line.append(el('span', 'k', `${seat} 号位`));
+    if (!entry) line.append(el('span', 'muted', '—'));
+    else if (entry.kind === 'pass') line.append(el('span', 'muted', '不出'));
+    else {
+      line.append(cardRow(entry.cards));
+      line.append(el('span', 'why', entry.text || ''));
+    }
+    trick.append(line);
+  });
+  if (frame.to_beat && frame.last) {
+    const line = el('div', 'line');
+    line.append(el('span', 'k', '要压'));
+    line.append(cardRow(frame.last.cards), el('span', 'why', frame.last.text || ''));
+    trick.append(line);
+  }
+  box.append(trick);
+
+  const ev = GAME.events[AT];
+  const next = el('div', 'next');
+  if (ev) {
+    next.append(document.createTextNode('接下来（第 ' + AT + ' 手）：'));
+    next.append(el('b', null, eventText(ev, AT)));
+    if (ANALYZABLE.has(AT)) next.append(el('span', 'hit', '　← 点下面事件行可以分析这一手'));
+  } else {
+    next.append(document.createTextNode('本局结束。'));
+  }
+  box.append(next);
+
+  const nav = el('div', 'nav');
+  const mk = (label, delta, disabled) => {
+    const b = el('button', null, label);
+    b.disabled = !!disabled;
+    b.onclick = () => step(delta);
+    return b;
+  };
+  nav.append(mk('⏮', -AT, AT === 0), mk('◀', -1, AT === 0));
+  const slider = el('input');
+  slider.type = 'range'; slider.min = 0; slider.max = GAME.frames.length - 1; slider.value = AT;
+  // 用 onchange 而不是 oninput：棋盘每次都是整块重建的，拖动途中重建会把正在拖的滑块弄没；
+  // 而且 oninput 会让滑过"可分析"的每一帧都发一次求解请求
+  slider.onchange = () => step(Number(slider.value) - AT);
+  nav.append(slider);
+  const tail = GAME.frames.length - 1;
+  nav.append(mk('▶', 1, AT === tail), mk('⏭', tail - AT, AT === tail));
+  nav.append(el('span', 'muted', `${AT} / ${tail}`));
+  box.append(nav);
+
+  // 事件表：点一行 = 跳到那一帧（能分析的顺手拉分析）
+  const log = el('div', 'log');
+  GAME.events.forEach((e, i) => {
+    const row = el('div', 'ev' + (i === AT ? ' on' : ''));
+    row.dataset.i = i;
+    row.append(el('span', 'n', String(i)));
+    row.append(el('span', null, eventText(e, i)));
+    if (ANALYZABLE.has(i)) row.append(el('span', 'hit', '可分析'));
+    row.onclick = () => step(i - AT);
+    log.append(row);
+  });
+  box.append(log);
+}
+
+/* 事件说人话。出牌的牌型名从"下一帧的桌面"里取（那一帧刚好记着这一手） */
+function eventText(ev, i) {
+  const who = (ev.seat === null || ev.seat === undefined) ? '' : `${ev.seat} 号位 `;
+  switch (ev.kind) {
+    case 'bid':
+      return `${who}${ev.value ? `叫 ${ev.value} 分` : '不叫'}`;
+    case 'landlord': {
+      const bottom = (ev.cards || []).map(cardName).join(' ');
+      return `${who}当地主${bottom ? `，底牌 ${bottom}` : ''}`;
+    }
+    case 'play': {
+      const after = GAME.frames[i + 1];
+      const entry = after && after.table ? after.table[ev.seat] : null;
+      const cards = (ev.cards || []).map(cardName).join(' ');
+      return `${who}出 ${cards}${entry && entry.text ? `（${entry.text}）` : ''}`;
+    }
+    case 'pass': return `${who}不出`;
+    case 'auto_on': return `${who}被托管${ev.timeout ? '（超时）' : ''}`;
+    case 'auto_off': return `${who}取消托管`;
+    case 'redeal': return '流局，重新发牌';
+    case 'finish': return '本局结束';
+    default: return `${who}${ev.kind}`;
+  }
+}
+
+function step(delta) {
+  if (!GAME) return;
+  const next = Math.max(0, Math.min(GAME.frames.length - 1, AT + delta));
+  if (next === AT) return;
+  AT = next;
+  renderBoard();
+  // 跳到"有分析"的那一手时把分析也带出来（点过的直接读缓存，不会再算一遍）
+  if (ANALYZABLE.has(AT)) analyze(AT);
+  else document.getElementById('analysis').replaceChildren();
+}
+
+/* ---------------------------------------------------------------- 逐手分析 */
+async function analyze(index) {
+  const box = document.getElementById('analysis');
+  if (CACHE.has(index)) { renderAnalysis(CACHE.get(index)); return; }
+  box.replaceChildren(el('div', 'loading', `第 ${index} 手正在算…（要跑引擎和残局求解）`));
+  const data = await api(`/review/game/${encodeURIComponent(GAME.game_id)}/decision/${index}`);
+  if (!data.ok) { box.replaceChildren(el('div', 'verdict', data.message || data.reason)); return; }
+  CACHE.set(index, data.decision);
+  renderAnalysis(data.decision);
+}
+
+function renderAnalysis(d) {
+  const box = document.getElementById('analysis');
+  box.replaceChildren();
+  const v = d.verdict || {};
+  box.append(el('div', 'verdict ' + (v.code || ''), `第 ${d.index} 手 · ${d.seat} 号位：${v.text || ''}`));
+
+  const seatRole = d.role === 'landlord' ? '地主' : '农民';
+  box.append(cardRow(d.hands[d.seat]));
+  box.append(el('div', 'why', `${d.seat} 号位（${seatRole}）当时的手牌；要压：${d.to_beat || '（他领出）'}`));
+
+  const table = el('table', 'cmp');
+  const row = (label, cards, text, extra) => {
+    const tr = el('tr');
+    tr.append(el('th', null, label));
+    const td = el('td');
+    td.append(cardRow(cards));
+    if (text) td.append(el('div', 'why', text));
+    if (extra) td.append(el('div', 'why', extra));
+    tr.append(td);
+    table.append(tr);
+    return tr;
+  };
+  row('实际出手', d.played.cards, d.played.text);
+  Object.keys(d.engines).forEach((spec) => {
+    const e = d.engines[spec];
+    const name = ENGINE_NAMES[spec] || spec;
+    if (e.error) { row(name, [], null, e.error); return; }
+    let prob = (e.win_prob === null || e.win_prob === undefined) ? '' : `估值 ${e.win_prob.toFixed(2)}`;
+    if (prob && String(e.reason || '').includes(prob)) prob = '';   // DouZero 的理由里已经带了估值，别写两遍
+    row(name, e.cards, `${e.text}${e.reason ? '　' + e.reason : ''}`, prob);
+  });
+  const s = d.solver;
+  if (!s) {
+    row('残局求解', [], null, '算不清（牌太多，或看不到三家手牌）');
+  } else if (!s.proved) {
+    row('残局求解', [], null, `没搜完（超预算），不表态（已搜 ${s.nodes} 个局面）`);
+  } else {
+    const best = s.winning && s.best_text && s.best_text.length
+      ? `能赢的着法：${s.best_text.join('、')}${s.solo ? '（队友乱打也照样赢）' : ''}`
+      : '';
+    const sample = s.winning ? (s.best || []).find((c) => c.length) || [] : [];
+    row('残局求解', sample, `${s.winning ? '我方必胜' : '我方必败'}，搜了 ${s.nodes} 个局面`, best);
+  }
+  box.append(table);
+}
+
+/* -------------------------------------------------------------------- 入口 */
+async function openGame(id, at) {
+  document.getElementById('analysis').replaceChildren();
+  CACHE = new Map();
+  const data = await api(`/review/game/${encodeURIComponent(id)}`);
+  if (!data.ok) {
+    document.getElementById('board').replaceChildren(el('div', 'verdict', data.message || data.reason));
+    GAME = null; markCurrentGame();
+    return;
+  }
+  GAME = data.game;
+  ANALYZABLE = new Map(GAME.decisions.map((d) => [d.index, d.solvable]));
+  AT = 0;
+  markCurrentGame();
+  renderBoard();
+  document.title = `复盘 ${GAME.game_id} · 斗地主 Copilot`;
+  // ?at=31 可以直接跳到第 31 手并把它算出来（方便收藏/分享一个具体局面）
+  if (Number.isInteger(at) && at > 0 && at < GAME.frames.length) step(at);
+}
+
+async function boot() {
+  const params = new URLSearchParams(location.search);
+  const want = params.get('game');
+  const at = Number(params.get('at'));
+  const data = await api('/review/games?limit=200');
+  if (!data.ok) { document.getElementById('msg').textContent = data.message || '读不到对局库'; return; }
+  GAMES = data.games;
+  renderList();
+  if (want) await openGame(want, at);
+  else if (GAMES.length) await openGame(GAMES[0].game_id);
+}
+boot().catch((err) => {
+  document.getElementById('msg').textContent = '出错了：' + err;
+});
+</script>
+</body>
+</html>

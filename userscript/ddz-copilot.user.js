@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         斗地主 Copilot
 // @namespace    ddz-copilot
-// @version      0.4.2
+// @version      0.7.4
 // @description  真实对局中实时给出可解释的出牌建议；可选代打（叫分/出牌、续局各自独立开关）
 // @author       you
 // @include      /^https?:\/\/[^/]+\/games\/doudizhu/
@@ -28,7 +28,7 @@
     'use strict';
 
     //: 面板上会显示它——"我到底更新成功没有"要能一眼看出来（必须与头部 @version 一致）
-    const VERSION = '0.4.2';
+    const VERSION = '0.7.4';
     const API = 'http://127.0.0.1:17876';
     const HEALTH_MS = 5000;
     const DEBOUNCE_MS = 150;
@@ -69,13 +69,23 @@
     })();
 
     // engine: 'heuristic' | 'douzero'（两个引擎选项）
+    // bid: 'loose'（宽，阈值低、叫得勤：43% 的牌会叫 1 分以上）
+    //    | 'strict'（严，默认，几乎不叫地主：10% 会叫，竞技场实测每局多 0.28 分）
+    //    旧版发的是 'safe' / 'conservative'，服务端两套都认（BID_TIER_ALIASES）
     // auto: 代打开关——叫分 + 出牌；autoContinue: 终局后自己点「再来一局」，**独立开关**
     //       （两者互不影响：只续局不代打是合法组合）；delayMs 是出手前的可视延迟
     const config = Object.assign(
-        {collapsed: false, engine: 'heuristic', left: null, top: null,
+        {collapsed: false, engine: 'heuristic', bid: 'strict', left: null, top: null,
          auto: true, autoContinue: true, delayMs: 700},
         store.get('ddz-copilot-config', {}),
     );
+    // 归一旧档位名（与服务端 BID_TIER_ALIASES 同一张表）：浏览器里可能还存着 0.7.3 的
+    // 'safe'/'conservative'，不归一的话两个按钮都不会高亮（data-bid 已经改成 loose/strict）。
+    (function normalizeBid() {
+        const aliases = {loose: 'loose', safe: 'loose', wide: 'loose',
+                         strict: 'strict', conservative: 'strict'};
+        config.bid = aliases[String(config.bid).toLowerCase()] || 'strict';
+    })();
 
     // ---------------------------------------------------------------- 运行时状态
 
@@ -94,6 +104,11 @@
     let adviseWatchdog = null;   // 在飞请求的看门狗：挂死了要能自己解套
     let adviseToken = 0;         // 回执令牌：只有最新那次请求的收尾算数
     let missedSchedules = 0;     // 心跳补排了几次（>0 就说明有路径漏排了）
+    //: 本局的**自述**，随 /ingest 一起归档。存档里没有它的话，"这局面板到底帮没帮上忙"
+    //: 就只能靠推理——之前复盘时吃过这个亏（判断"是不是工具的锅"花了好几轮）。
+    let panelLog = null;
+    let hostedNow = false;       // 平台此刻是否在托管我们（那一刻它自己打，我们的建议不生效）
+    let endgameMode = null;      // 服务端的残局模式，页脚显示
     let pending = null;          // 待执行动作：{version, timer, label}
 
     // ---------------------------------------------------------------- fetch 拦截
@@ -130,6 +145,19 @@
 
     // ---------------------------------------------------------------- 状态分发
 
+    //: 只报一次：真实对局的 state 里到底有没有别家手牌（求解器的前提）。
+    //: 平台可能只给"超级用户"发 hands —— 那求解器在普通对局里一次都跑不起来。
+    let stateShapeReported = false;
+    function reportStateShape(state) {
+        if (stateShapeReported || !state || state.phase !== 'playing') return;
+        stateShapeReported = true;
+        const keys = Object.keys(state);
+        console.info('[ddz-copilot] 这一局的 state 带这些字段：', keys.join(','),
+            '｜有 hands:', Array.isArray(state.hands),
+            '｜有 fairness:', !!state.fairness,
+            '｜有 log 条数:', Array.isArray(state.log) ? state.log.length : '无');
+    }
+
     function accept(state) {
         if (!state || typeof state.version !== 'number') return;
         if (state.unchanged) return;               // 只刷新计时，不影响建议
@@ -141,9 +169,13 @@
             ingestedVersion = -1;
             lastError = '';
             continuedOnce = false;   // 新的一局：续局标记复位（不靠整页跳转也能接着自动续）
+            hostedNow = false;       // 新的一局：托管标记复位（下一份状态会重新判）
+            resetPanelLog();         // 新的一局：自述也重来
         }
         lastVersion = state.version;
         latestState = state;
+        noteHosted(state);
+        reportStateShape(state);
 
         if (state.phase === 'finished') {
             if (ingestedVersion !== state.version) {
@@ -196,6 +228,7 @@
         if (adviseInFlight) return;
         const version = latestState.version;
         const token = ++adviseToken;
+        const askedAt = Date.now();
         adviseInFlight = true;
         render();          // 立刻把"正在算…"显示出来：此刻确实有一个请求在飞
         adviseWatchdog = setTimeout(() => {
@@ -209,7 +242,7 @@
             session,
             game_id: currentGameId(),
             state: latestState,
-            options: {agent: engineSpec()},
+            options: {agent: engineSpec(), bid: config.bid},
         })
             .then((data) => {
                 finishAdvise(token);
@@ -217,6 +250,7 @@
                 lastError = '';
                 if (data && (!latestState || latestState.version === version)) {
                     advice = Object.assign({version}, data);
+                    logAdvice(data, Date.now() - askedAt);
                     if (!data.ok) lastError = data.message || data.reason || '';
                     render();
                     autoAct(data);
@@ -238,9 +272,44 @@
     }
 
     function ingest(state) {
-        post('/ingest', {state, game_id: currentGameId()})
+        // 残局模式是探活回来才有的值——建自述那会儿还是 null，发之前补上，免得记录里永远是 None
+        if (panelLog) panelLog.endgame_mode = endgameMode;
+        post('/ingest', {state, game_id: currentGameId(), panel: panelLog})
             .then(() => markServiceOk(true))
             .catch(() => markServiceOk(false));
+    }
+
+    function resetPanelLog() {
+        panelLog = {
+            script: VERSION, engine: config.engine, auto: config.auto,
+            auto_continue: config.autoContinue, endgame_mode: endgameMode,
+            // 叫分档位也归档：不记的话，事后只能从"叫了几分"反推当时用的哪档
+            bid: config.bid,
+            decisions: [], auto_actions: 0, auto_passes: 0, hosted: 0,
+        };
+    }
+
+    /** 记一笔"这一手面板建议了什么"。只留最近 200 条，够复盘用。 */
+    function logAdvice(data, adviseMs) {
+        if (!panelLog || !data) return;
+        const rec = data.recommended || {};
+        panelLog.decisions.push({
+            v: data.version || 0,
+            cards: rec.cards || [],
+            source: rec.source || null,
+            engine: (data.engine || {}).name || null,
+            solver: data.solver && data.solver.used ? 1 : 0,
+            ms: Math.round(adviseMs),
+        });
+        if (panelLog.decisions.length > 200) panelLog.decisions.shift();
+    }
+
+    /** 平台把我们托管了吗？——托管接管时它自己叫分/出牌，那不是我们的建议。 */
+    function noteHosted(state) {
+        if (!state || state.seat === null) return;
+        const me = state.players && state.players[state.seat];
+        hostedNow = !!(me && me.auto);
+        if (hostedNow && panelLog) panelLog.hosted += 1;
     }
 
     function engineSpec() {
@@ -275,7 +344,14 @@
     /** health 探活：它才是"服务在不在"的权威，单次 /advise 失败不作数。 */
     function probeHealth() {
         nativeFetch(API + '/health', {cache: 'no-store'})
-            .then((response) => markServiceOk(response.ok))
+            .then((response) => response.json().then((body) => {
+                const mode = body && body.endgame ? body.endgame.mode : null;
+                if (mode !== endgameMode) {
+                    endgameMode = mode;
+                    render();
+                }
+                markServiceOk(response.ok);
+            }).catch(() => markServiceOk(response.ok)))
             .catch(() => markServiceOk(false));
     }
 
@@ -302,10 +378,12 @@
             body: shadow.querySelector('.body'),
             toggle: shadow.querySelector('.collapse'),
             selectBtn: shadow.querySelector('.select'),
+            reviewBtn: shadow.querySelector('.review'),
             masterBtn: shadow.querySelector('.auto-master'),
             nextBtn: shadow.querySelector('.auto-next'),
             status: shadow.querySelector('.status'),
             engines: Array.from(shadow.querySelectorAll('.engine')),
+            bids: Array.from(shadow.querySelectorAll('.bid')),
             header: shadow.querySelector('.header'),
             ver: shadow.querySelector('.ver'),
             footer: shadow.querySelector('.footer'),
@@ -327,6 +405,12 @@
             ui.panel.classList.toggle('collapsed', config.collapsed);
             store.set('ddz-copilot-config', config);
         });
+        ui.reviewBtn.addEventListener('click', () => {
+            // 新标签打开复盘页。拿不到局号（比如不在对局页）就只带路径，页面自己列全部对局。
+            // 别拼成 `?game=null` —— 那是个真字符串，服务会去找一个叫 null 的局。
+            const id = currentGameId();
+            window.open(API + '/review' + (id ? '?game=' + encodeURIComponent(id) : ''), '_blank');
+        });
         ui.nextBtn.addEventListener('click', () => {
             config.autoContinue = !config.autoContinue;
             store.set('ddz-copilot-config', config);
@@ -335,7 +419,6 @@
                 scheduleContinue();   // 打开时这局可能已经结束了
             }
         });
-        ui.selectBtn.addEventListener('click', () => { selectRecommended(); });
         ui.engines.forEach((button) => button.addEventListener('click', () => {
             const wanted = button.dataset.engine;
             if (config.engine === wanted) return;
@@ -347,9 +430,27 @@
             scheduleAdvise();
             render();
         }));
+        ui.bids.forEach((button) => button.addEventListener('click', () => {
+            const wanted = button.dataset.bid;
+            if (config.bid === wanted) return;
+            config.bid = wanted;
+            store.set('ddz-copilot-config', config);
+            advice = null;                 // 换叫分档就重新问，别拿旧档的结论糊弄
+            lastError = '';
+            syncBidButtons();
+            scheduleAdvise();
+            render();
+        }));
         syncEngineButtons();
+        syncBidButtons();
         makeDraggable();
         render();
+    }
+
+    function syncBidButtons() {
+        ui.bids.forEach((button) => {
+            button.classList.toggle('active', button.dataset.bid === config.bid);
+        });
     }
 
     function syncEngineButtons() {
@@ -449,6 +550,9 @@
         ui.body.replaceChildren();
         const usable = !!data && data.ok;
         ui.selectBtn.disabled = !usable || !myTurn();
+        // 「复盘」永远可点（哪怕这局还没归档，页面会说明），只跟服务在不在有关；
+        // 也**不跟"轮到我"绑**——看别家怎么打的才是复盘的主要用途
+        ui.reviewBtn.disabled = serviceOk === false;
 
         if (usable) {
             if (data.bidding) {
@@ -512,6 +616,10 @@
                 ? '本局已结束（续局已关）'
                 : (continuedOnce ? '已点续局' : '准备续局…');
             ui.status.className = config.autoContinue ? 'status active' : 'status';
+        } else if (hostedNow) {
+            // 平台接管时我们按什么都轮不上——这里写"正在算…"就是骗人（复盘时正是这么被骗的）
+            ui.status.textContent = '⚠ 平台托管中，代打让位';
+            ui.status.className = 'status bad';
         } else if (!data && myTurn()) {
             // 只有**真有请求在飞**才说"正在算"；没在算却说正在算，就是面板在骗人
             ui.status.textContent = adviseInFlight ? '自动 · 正在算…' : '自动 · 等待建议…';
@@ -529,10 +637,12 @@
         // 拿不到引擎名 ≠ 服务断了。没有引擎名（还没算过、或这份响应里没人出建议）时就写
         // "会话配的是哪个引擎"；只有探活失败才写"未连接"——和横幅"服务未启动"同口径。
         const configured = config.engine === 'douzero' ? 'douzero:WP' : 'heuristic';
+        const modeText = {ondemand: '残局按需', off: '残局关'}[endgameMode] || '';
         const parts = [
             solvedBySolver ? '残局求解'
                 : (engine && engine.name ? engine.name
                     : (serviceOk === false ? '未连接' : configured)),
+            modeText,
             engine && engine.device ? engine.device : '',
             timing !== null && timing !== undefined ? `${Math.round(timing)}ms` : '',
             stale ? '建议已过期' : '',
@@ -612,12 +722,17 @@
         return box;
     }
 
-    /** 策略分歧：两个引擎首选不一致，把两边都摆出来让人自己判断。 */
+    /** 策略分歧：另一个意见是什么，以及（求解器算过的话）那一手会不会输。
+     *
+     * 求解器接管时这段最有价值：句子直接告诉你"DouZero 想打对 10 —— 求解器：那一手会输"。 */
     function disagreementBlock(info) {
         const box = el('div', 'block disagree');
         box.append(el('div', 'label', '策略分歧'));
-        box.append(el('div', 'note', `DouZero：${info.engine.description}`));
-        box.append(el('div', 'note', `启发式：${info.heuristic.description}`));
+        box.append(el('div', 'note', info.text || '两个引擎的首选不一致'));
+        const engine = info.engine || {};
+        if (engine.description) {
+            box.append(el('div', 'note muted', `当前建议：${engine.description}`));
+        }
         return box;
     }
 
@@ -773,6 +888,7 @@
         if (!recommended.cards || !recommended.cards.length) {
             const passButton = visibleButton((text) => text.indexOf('不出') !== -1);
             if (!passButton) return false;
+            if (panelLog) panelLog.auto_passes += 1;   // 「不出」也是我们动的这一手，别漏记
             passButton.click();
             return true;
         }
@@ -821,6 +937,7 @@
             chooser.dispatchEvent(new Event('change', {bubbles: true}));
         }
 
+        if (panelLog) panelLog.auto_actions += 1;   // 面板真的动了手，记一笔
         playButton.click();
         return true;
     }
@@ -930,6 +1047,7 @@
         // 建议是"按需"的：轮到自己时页面本来就在 900ms 轮询，不需要自己再加定时器。
         // 只有服务掉线时才需要自己探活，好把"服务未启动"显示出来。
         probeHealth();
+        resetPanelLog();
         setInterval(() => {
             if (serviceOk !== true || !latestState) probeHealth();
         }, HEALTH_MS);
@@ -995,6 +1113,7 @@
             .verdict-line.win { background: rgba(56,142,60,.3); color: #d7ffd9; font-weight: 600; }
             .verdict-line.lose { background: rgba(198,40,40,.28); color: #ffe1e1; font-weight: 600; }
             .disagree .note { color: #ffcc80; }
+            .disagree .note.muted { color: #9aa0a6; }
             .body { padding: 8px 10px 4px; display: flex; flex-direction: column; gap: 8px; max-height: 60vh; overflow-y: auto; }
             .block { border-top: 1px solid rgba(255,255,255,.08); padding-top: 7px; }
             .block:first-child { border-top: 0; padding-top: 0; }
@@ -1031,11 +1150,12 @@
                 background: #2f6feb; color: #fff; font-size: 12px;
             }
             .toolbar.engines { gap: 4px; padding-bottom: 2px; }
-            .toolbar.engines button {
+            .toolbar.engines.bids-row { padding-top: 0; }
+            .toolbar.engines button, .toolbar.engines .bid {
                 flex: 1; text-align: center; background: rgba(255,255,255,.08);
                 color: #c8ccd1; border: 1px solid transparent;
             }
-            .toolbar.engines button.active {
+            .toolbar.engines button.active, .toolbar.engines .bid.active {
                 background: rgba(47,111,235,.28); color: #fff; border-color: #2f6feb;
             }
             .toolbar button[disabled] { background: rgba(255,255,255,.12); color: #9aa0a6; cursor: default; }
@@ -1068,12 +1188,17 @@
                 <button class="engine" data-engine="heuristic">启发式</button>
                 <button class="engine" data-engine="douzero">DouZero</button>
             </div>
+            <div class="toolbar engines bids-row">
+                <button class="bid" data-bid="loose" title="阈值 (-2, 2, 6)：43% 的牌会叫 1 分以上">叫分 宽</button>
+                <button class="bid" data-bid="strict" title="阈值 (4, 8, 12)：只有 10% 的牌会叫，竞技场实测每局多 0.28 分">叫分 严</button>
+            </div>
             <div class="toolbar master">
                 <button class="auto-master">自动打牌：开</button>
                 <button class="auto-next">自动续局：开</button>
             </div>
             <div class="toolbar">
                 <button class="select" disabled>帮我选中</button>
+                <button class="review" title="在浏览器里复盘这一局（要等服务归档后才有）">复盘</button>
             </div>
             <div class="status"></div>
             <div class="footer"></div>

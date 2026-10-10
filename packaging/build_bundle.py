@@ -113,6 +113,34 @@ def install_python(target: Path) -> Path:
     return found[0]
 
 
+def write_tool_bat(path: Path, python_rel: str, module: str, title: str, note: str = "") -> None:
+    """把某个 ``ddz.tools.*`` 包成双击就能跑的东西（参数照传：``看战报.bat --recent 40``）。
+
+    目标机上的人多半不想开命令行——而这些工具是"这阵子到底打得怎么样"的第一入口，
+    所以给它们双击入口。`PYTHONPATH` 和启动服务用的是同一套。
+    """
+    content = f"""@echo off
+chcp 65001 >nul
+cd /d "%~dp0"
+title 斗地主 Copilot {title}
+
+if not exist "{python_rel}" (
+    echo [错误] 找不到 {python_rel} —— 这个包不完整，请重新生成或重新拷贝。
+    pause
+    exit /b 1
+)
+
+set "PYTHONPATH=%~dp0;%~dp0vendor"
+set "PYTHONUTF8=1"
+{note}echo.
+"{python_rel}" -m {module} %*
+echo.
+echo 看完按任意键关掉。
+pause >nul
+"""
+    path.write_text(content, encoding="utf-8")
+
+
 def write_bat(path: Path, python_rel: str, has_douzero: bool) -> None:
     engines = "启发式 + DouZero" if has_douzero else "启发式（本包不含 DouZero）"
     content = f"""@echo off
@@ -126,6 +154,11 @@ if not exist "{python_rel}" (
     exit /b 1
 )
 
+REM ── 残局求解模式：改这一行就能切换（浮窗页脚会显示当前模式）────────────
+REM    ondemand = 默认。轮到我时按需求解（残局够小时给出"必胜/必败"的证明）
+REM    off      = 完全不用求解器
+set "DDZ_ENDGAME=ondemand"
+
 netstat -ano | findstr ":17876" | findstr "LISTENING" >nul 2>&1
 if not errorlevel 1 (
     echo 服务已经在跑了（端口 17876 被占用），不用再启动一个。
@@ -137,6 +170,7 @@ if not errorlevel 1 (
 echo.
 echo   斗地主 Copilot 本地服务
 echo   引擎：{engines}
+echo   残局：%DDZ_ENDGAME%（改「启动服务.bat」里的 DDZ_ENDGAME 可切换）
 echo.
 echo   这个窗口**不要关**（关了浮窗就收不到建议）。
 echo   服务地址 http://127.0.0.1:17876 —— 浏览器里打开对局页即可。
@@ -144,7 +178,7 @@ echo.
 set "PYTHONPATH=%~dp0;%~dp0vendor"
 set "PYTHONUTF8=1"
 set "PYTHONUNBUFFERED=1"
-"{python_rel}" -m ddz.service
+"{python_rel}" -m ddz.service --endgame %DDZ_ENDGAME%
 
 echo.
 echo 服务已退出（窗口可以关了）。
@@ -174,11 +208,30 @@ README = """斗地主 Copilot —— 一键包
      **改完脚本要刷新对局页才生效。**
    · 浮窗默认用启发式；点「DouZero」切到更强的引擎（本包是否含 DouZero 见下）。
    · 「帮我选中」只替你在手牌上做选择，点不点出牌由你自己决定。
+   · 浮窗写着「平台托管中，代打让位」时，是**平台的机器人**在替你打（局时用完就会这样），
+     那几手不是浮窗的建议；想自己接管，在游戏页面点「取消托管」。
 
 四、本包内容
    {douzero_line}
 
-五、常见问题
+五、残局求解模式（可切换）
+   「启动服务.bat」里有一行 DDZ_ENDGAME，两个值：
+     · ondemand（默认）：轮到我时按需求解，残局够小时给出"必胜/必败"的**证明**。
+     · off：不用求解器。
+   当前模式会显示在浮窗页脚（残局按需 / 残局关）。
+   （实盘价值≈0，它的用武之地是复盘——别指望它把胜率抬上去。）
+
+六、复盘与战报（服务开着的时候都能用）
+   · **网页复盘（推荐）**：在对局页点浮窗上的「复盘」按钮，浏览器里就能看这一局——
+     三家手牌全亮、可步进回退，点**任意一手**（三家都行）就出对比：实际打的 / 启发式 /
+     DouZero / 残局求解，还带一条硬判定（打丢了必胜 / 保住了 / 本来就必败 / 算不清）。
+     也可以直接开 http://127.0.0.1:17876/review 看全部对局。
+   · 双击「看战报.bat」：一条命令回答"最近怎么老输"——按「角色 × 底分」切分胜率与净分、
+     浮窗建议的遵循率、哪几局被平台托管。想多看几局：看战报.bat --recent 40
+   · 双击「看复盘.bat」是同一件事的命令行版（**慢**，要跑残局求解，可能几分钟）。
+     只看某一局：看复盘.bat --game 38615，看某一手：看复盘.bat --at 38615 31
+
+七、常见问题
    · 浮窗显示「服务未启动」→ 那个黑窗口是不是被关了？重新双击「启动服务.bat」。
    · 浮窗一直显示「未连接」→ 说明探活失败，同上。
    · 端口被占用 → 上一份服务还在跑，找到那个窗口关掉，或者直接用着。
@@ -238,11 +291,14 @@ def main(argv: list[str] | None = None) -> int:
 
     print("[6/6] 启动器与说明")
     write_bat(bundle / "启动服务.bat", python_rel, has_douzero)
+    write_tool_bat(bundle / "看战报.bat", python_rel, "ddz.tools.report", "战报")
+    write_tool_bat(bundle / "看复盘.bat", python_rel, "ddz.tools.review", "复盘",
+                   note="echo   扫全部对局可能要几分钟（要跑残局求解）。\necho.\n")
     (bundle / "说明.txt").write_text(
         README.format(
             douzero_line=("· 含 DouZero（torch + 权重），浮窗上可以切过去。"
                           if has_douzero else
-                          "· **不含 DouZero**：服务只用启发式，功能照常，只是棋力弱一些。")
+                          "· **不含 DouZero**：服务只用启发式，功能照常，只是棋力弱一些。"),
         ),
         encoding="utf-8",
     )

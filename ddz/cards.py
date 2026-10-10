@@ -146,6 +146,17 @@ def parse_cards(text: str) -> list[int]:
     return out
 
 
+def action_key(cards: Iterable[int] | None) -> tuple[int, ...] | None:
+    """一手牌在**点数**上的身份；``None``/空表示"不出"。
+
+    花色不参与任何规则，所以 (3♠,3♥) 与 (3♠,3♣) 是同一手；三带一里"带 3"和"带 9"
+    则是两个不同的动作（后续手牌不同），必须分得开——所以不能只看牌型 key。
+    """
+    if not cards:
+        return None
+    return tuple(sorted(rank(card) for card in cards))
+
+
 def format_cards(cards: Iterable[int]) -> str:
     """升序的 ``"3,7,11"``——直接作为平台 ``play`` 的 ``cards`` 参数。"""
     return ",".join(str(c) for c in sort_cards(cards))

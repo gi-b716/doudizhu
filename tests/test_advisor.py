@@ -663,7 +663,9 @@ def test_disagreement_is_reported_when_the_engines_differ(advisor):
     assert result["ok"] is True
     block = result["disagreement"]
     assert block is not None, "两个引擎的首选明显不同，应该报出来"
-    assert block["engine"]["description"] and block["heuristic"]["description"]
+    assert block["engine"]["description"] and block["other"]["description"]
+    assert block["other"]["name"] == "heuristic"
+    assert block["other"]["winning"] is None, "这份局面没算过，求解器不该乱发表意见"
     assert block["text"].startswith("策略分歧")
 
     # 两边一致时不该报
@@ -688,3 +690,134 @@ def test_idle_responses_still_name_the_engine(advisor):
     finished = advisor.advise("t3", states()[-1])
     assert finished["reason"] == "finished"
     assert finished["engine"]["name"] == "heuristic"
+
+
+def test_disagreement_says_when_the_others_move_would_lose(tmp_path):
+    """求解器接管时，把引擎的意见摆出来并**判它会不会输**——这是这个功能最有用的时刻。
+
+    局面就是用户抓到的那一手（地主一对 K，我领出）：求解器证明"领出任意单牌必胜"，
+    而 DouZero 想打那对 10 —— 求解器能直接指出那一手会输。
+
+    **预算给宽**：这条测的是行为，不是"这台机器忙不忙"。用默认的 120ms 时，全量跑测试
+    （机器负载高）求解器偶尔证不出来，于是"求解器接管"这个前提就没成立——测试跟着机器
+    忙闲抖，那是测试的错，不是产品的错（产品证不出来就回落引擎，本来就该如此）。
+    """
+    from ddz.data.archive import Archive
+    from ddz.engine.base import Candidate
+    from ddz.moves import legal_moves
+
+    advisor = Advisor(
+        archive=Archive(tmp_path / "g.jsonl", raw_path=tmp_path / "raw"),
+        endgame_budget_ms=5000, rank_budget_ms=1000,
+    )
+
+    class PairEngine(StubEngine):
+        def act(self, state):
+            moves = legal_moves(state.advise_hand, state.to_beat, canonical=True)
+            pair = next(m for m in moves if m.pattern.type == "pair")
+            return Candidate(pair, 0.9, ["替身想打对子"], ["stub"], self.name)
+
+    advisor.register("douzero:WP", PairEngine())
+    state = endgame_payload(["K K", "7 7 8 8 J 2 小王 大王", "4 6 7 9 9 10 10 Q A 2"],
+                            turn=2, landlord=0)
+    result = advisor.advise("d1", state, AdviseOptions(agent="douzero:WP"))
+
+    assert result["solver"]["used"] is True, "求解器该接管"
+    assert result["recommended"]["source"] == "solver"
+    block = result["disagreement"]
+    assert block is not None, "求解器接管时也要给出另一个意见"
+    assert block["other"]["name"] == "douzero:WP"
+    assert block["other"]["winning"] is False, "那一手在求解器眼里是输棋"
+    assert "会输" in block["text"]
+
+
+def test_disagreement_is_quiet_when_both_agree(tmp_path):
+    """两个意见其实是一手时不该报分歧。"""
+    from ddz.data.archive import Archive
+    from ddz.engine.base import Candidate
+
+    advisor = Advisor(
+        archive=Archive(tmp_path / "g.jsonl", raw_path=tmp_path / "raw"),
+        endgame_budget_ms=5000, rank_budget_ms=1000,
+    )
+
+    class SolverLikeEngine(StubEngine):
+        def act(self, state):
+            # 预算给宽：这条测的是"两边一致时不报分歧"，别让机器忙闲影响它
+            from ddz.engine.endgame import Limits, solve
+
+            move = solve(state, limits=Limits(time_budget_ms=5000, rank_budget_ms=1000)).move
+            return Candidate(move, 1.0, ["照抄求解器"], ["stub"], self.name)
+
+    advisor.register("douzero:WP", SolverLikeEngine())
+    state = endgame_payload(["K K", "7 7 8 8 J 2 小王 大王", "4 6 7 9 9 10 10 Q A 2"],
+                            turn=2, landlord=0)
+    result = advisor.advise("d2", state, AdviseOptions(agent="douzero:WP"))
+    assert result["solver"]["used"] is True
+    assert result["disagreement"] is None
+
+
+# --------------------------------------------------------------------- 叫分档位
+
+
+def test_the_two_bid_tiers_mean_what_they_say():
+    """两档的含义要钉死：**宽档会叫、严档不叫**（阈值上移就是"把地主位让出去"）。
+
+    名字对应的是**阈值高低**不是态度：宽 = 阈值低 = 叫得勤，严 = 阈值高 = 几乎不叫。
+    顺手证明这档位不是摆设——存在一手牌，两档给出不同的建议。
+    """
+    import random
+
+    from ddz import cards as C
+    from ddz.engine.bidding import (
+        CONSERVATIVE_THRESHOLDS, DEFAULT_BID_TIER, THRESHOLDS, bid_for, thresholds_of_tier,
+        tier_label, tier_of,
+    )
+
+    assert CONSERVATIVE_THRESHOLDS[0] > THRESHOLDS[0], "严档的阈值必须更高"
+    assert tier_label("loose") == "宽" and tier_label("strict") == "严"
+    # 旧脚本发过的两个词都得还认（浏览器里的浮窗不跟着仓库升级）
+    assert tier_of("safe") == "loose" and tier_of("conservative") == "strict"
+    assert tier_of(DEFAULT_BID_TIER) == "strict", "产品默认档是严档"
+    assert thresholds_of_tier("") == thresholds_of_tier("strict")
+    assert thresholds_of_tier("loose").one == THRESHOLDS[0]
+
+    rng = random.Random(20261007)
+    found = None
+    for _ in range(400):
+        hand = C.sort_cards(rng.sample(C.full_deck(), 17))
+        loose = bid_for(hand, thresholds=thresholds_of_tier("loose")).value
+        strict = bid_for(hand, thresholds=thresholds_of_tier("strict")).value
+        if loose > strict:
+            found = (hand, loose, strict)
+            break
+    assert found, "找了 400 手牌都没有一档之差？阈值八成写错了"
+    hand, loose, strict = found
+    assert loose >= 1 and strict == 0
+
+
+def test_the_bid_option_reaches_the_advice(advisor):
+    """面板选的叫分档位要真的改建议（不是发过去被忽略）。"""
+    import random
+
+    from ddz import cards as C
+    from ddz.engine.bidding import CONSERVATIVE_THRESHOLDS, THRESHOLDS, strength_of
+    from helpers import platform_bidding
+
+    rng = random.Random(7)
+    hand = None
+    for _ in range(400):
+        candidate = C.sort_cards(rng.sample(C.full_deck(), 17))
+        if THRESHOLDS[0] <= strength_of(candidate) < CONSERVATIVE_THRESHOLDS[0]:
+            hand = candidate
+            break
+    assert hand, "没找到'宽档叫、严档不叫'的牌"
+
+    payload = platform_bidding(hand)
+    loose = advisor.advise("b1", payload, AdviseOptions(bid="loose"))
+    strict = advisor.advise("b2", payload, AdviseOptions(bid="strict"))
+    assert loose["bidding"]["value"] >= 1
+    assert strict["bidding"]["value"] == 0
+    # 不给 bid 时走默认档，且**默认档就是严档**（不是靠 HeuristicAgent 的 None 默认滑回宽档）
+    default = advisor.advise("b3", payload, AdviseOptions())
+    assert default["bidding"]["value"] == strict["bidding"]["value"]

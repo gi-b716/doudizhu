@@ -196,8 +196,12 @@ def reason_rlcard_random() -> str:
     return "RLCard 规则基线：没有同型能压，它在合法着法里随机抓了一手"
 
 
-def reason_solver_win(label: str, nodes: int) -> str:
-    return f"残局求解：这一手必胜（{label}）——双方都最优也赢，搜了 {nodes} 个局面"
+def reason_solver_win(label: str, nodes: int, solo: bool = False, worlds: int = 1) -> str:
+    if worlds > 1:
+        return (f"残局求解：这一手必胜（{label}）——无论对手的牌怎么分、谁怎么打都赢"
+                f"（枚举了 {worlds} 种可能的分配）")
+    tail = "，而且不依赖队友配合（他乱打也照样赢）" if solo else ""
+    return f"残局求解：这一手必胜（{label}）{tail}——双方都最优也赢，搜了 {nodes} 个局面"
 
 
 def reason_solver_pass() -> str:
@@ -208,8 +212,13 @@ def reason_solver_lost() -> str:
     return "残局求解：这个局面已经必败（对方最优应对下赢不了），只能尽量争取他失误"
 
 
-def reason_disagree(cards_text: str) -> str:
-    return f"策略分歧：启发式想打 {cards_text}"
+def reason_disagree(other_name: str, cards_text: str, verdict: bool | None = None) -> str:
+    """分歧文案。``verdict``：求解器眼里"那一手"是否也能赢（``None`` = 没算过，不评论）。"""
+    if verdict is True:
+        return f"策略分歧：{other_name} 想打 {cards_text}（求解器：那一手同样能赢）"
+    if verdict is False:
+        return f"策略分歧：{other_name} 想打 {cards_text} —— 求解器：那一手会输"
+    return f"策略分歧：{other_name} 想打 {cards_text}"
 
 
 def reason_quiet() -> str:

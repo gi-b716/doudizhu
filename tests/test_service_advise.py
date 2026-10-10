@@ -181,7 +181,7 @@ def test_userscript_offers_two_engines():
     source = USERSCRIPT.read_text(encoding="utf-8")
     assert 'data-engine="heuristic"' in source and 'data-engine="douzero"' in source
     assert "douzero:WP" in source
-    assert "options: {agent: engineSpec()}" in source
+    assert "options: {agent: engineSpec(), bid: config.bid}" in source
     assert "engineSpec" in source
 
 
@@ -421,3 +421,115 @@ def test_userscript_footer_distinguishes_idle_from_disconnected():
     source = USERSCRIPT.read_text(encoding="utf-8")
     assert "serviceOk === false ? '未连接' : configured" in source
     assert "const configured = config.engine === 'douzero' ? 'douzero:WP' : 'heuristic';" in source
+
+
+def test_userscript_shows_the_endgame_mode():
+    """面板要显示当前残局模式（启动参数决定的那个），页脚一眼可见。
+
+    （`prefetch` 那档已删：实测它在实盘买不到东西。）
+    """
+    source = USERSCRIPT.read_text(encoding="utf-8")
+    assert "{ondemand: '残局按需', off: '残局关'}" in source
+    assert "body.endgame.mode" in source
+    assert "maybePrefetch" not in source, "预取那套已经删掉，别留半截"
+
+
+def test_userscript_renders_the_disagreement_with_a_verdict():
+    """分歧块要能显示"另一个引擎想打什么"，以及求解器对那一手的判断。"""
+    source = USERSCRIPT.read_text(encoding="utf-8")
+    assert "info.text" in source
+    assert "当前建议：" in source
+    assert "info.other || info.heuristic" not in source, "已经不用旧的 heuristic 字段了"
+
+
+def test_userscript_reports_itself_with_every_game():
+    """浮窗每局要交一份**自述**（引擎/模式/开关/每手建议/被托管几次），随归档一起存。
+
+    之前的复盘吃过亏：判断"是不是工具的锅"只能靠推理（我花了好几轮对话才证明某段时间
+    面板是正常的）。有了这份自述，一条记录就能回答。
+    """
+    source = USERSCRIPT.read_text(encoding="utf-8")
+    assert "function resetPanelLog()" in source
+    assert "function logAdvice(" in source
+    assert "function noteHosted(" in source
+    assert "panel: panelLog" in source, "归档时要带上自述"
+    assert "panelLog.auto_actions += 1" in source, "代打动手要计数（跟没跟得上一眼可见）"
+    # 「不出」也是我们动的那一手。只记出牌的话，"面板出手 3/8"会被误读成"没跟上"——
+    # 复盘最近 14 局时真的这么误读过一次，所以两条路都要计数。
+    assert "panelLog.auto_passes += 1" in source, "「不出」也要计数"
+    assert "hostedNow" in source and '平台托管中' in source, "被托管时状态行要说实话"
+
+
+def test_userscript_has_a_review_button():
+    """「复盘」按钮是网页复盘器的唯一入口（用户要求"通过油猴脚本查看"）。
+
+    两处都在钉"能不能用"：按钮要在模板里、要接线、要带局号；**拿不到局号时不许拼成
+    ``?game=null``**——那是个真字符串，服务会去找一个叫 null 的局。
+    """
+    source = USERSCRIPT.read_text(encoding="utf-8")
+    assert 'class="review"' in source, "工具栏上要有「复盘」按钮"
+    assert "ui.reviewBtn" in source and ".reviewBtn.addEventListener" in source, "按钮要接线"
+    assert "window.open(API + '/review'" in source, "要能打开复盘页"
+    assert "encodeURIComponent(id)" in source and "id ? '?game='" in source, \
+        "带局号打开；没有局号（不在对局页）时就只开列表，别拼 ?game=null"
+    assert "hostedNow && panelLog) panelLog.hosted += 1" in source, "平台托管要计数（那不是我们的建议）"
+    # **定义了还得接线**：这三个函数必须真的被调用（写好了没接上，等于没写）
+    assert source.count("resetPanelLog()") >= 3, "启动与换局都要重建自述"
+    assert "noteHosted(state);" in source, "每次状态都要看有没有被托管"
+
+
+def test_userscript_has_a_bid_toggle():
+    """浮窗上要能切叫分档位（默认严档）。
+
+    按钮上的字是「宽 / 严」——**对应阈值高低**。曾经的「稳健 / 保守」是一对近义词，
+    两个按钮看着一模一样（用户原话：这俩没啥区别）。
+    """
+    source = USERSCRIPT.read_text(encoding="utf-8")
+    assert 'data-bid="loose"' in source and 'data-bid="strict"' in source
+    assert "叫分 宽" in source and "叫分 严" in source
+    assert "叫分 稳健" not in source and "叫分 保守" not in source
+    assert "bid: 'strict'" in source, "默认档是严档（竞技场测出来更赚的那档）"
+    assert "options: {agent: engineSpec(), bid: config.bid}" in source
+    assert "function syncBidButtons()" in source
+    # 换档要重新问（旧档的结论不能留）
+    assert "换叫分档就重新问" in source
+
+
+def test_the_bid_option_survives_the_http_layer(client):
+    """叫分档位要能穿过 HTTP —— 这条是补的坑。
+
+    pydantic 默认丢掉模型里没有的键，"脚本发了 + 服务端实现了 + 模型里没写"会表现成
+    **这个选项完全不起作用**。当时只测了直接构造 `AdviseOptions` 的路径，HTTP 这层漏了，
+    结果两档在真实服务里给出一模一样的建议。
+    """
+    import random
+
+    from ddz import cards as C
+    from ddz.engine.bidding import CONSERVATIVE_THRESHOLDS, THRESHOLDS, strength_of
+    from helpers import platform_bidding
+
+    rng = random.Random(7)
+    hand = None
+    for _ in range(400):
+        candidate = C.sort_cards(rng.sample(C.full_deck(), 17))
+        if THRESHOLDS[0] <= strength_of(candidate) < CONSERVATIVE_THRESHOLDS[0]:
+            hand = candidate
+            break
+    assert hand
+    payload = platform_bidding(hand)
+    loose = client.post("/advise", json={
+        "session": "bs", "state": payload, "options": {"bid": "loose"},
+    }).json()
+    strict = client.post("/advise", json={
+        "session": "bc", "state": payload, "options": {"bid": "strict"},
+    }).json()
+    assert loose["bidding"]["value"] >= 1
+    assert strict["bidding"]["value"] == 0, "HTTP 把 bid 字段吃掉了"
+
+    # 旧脚本（≤0.7.3）发的是 safe / conservative，**必须继续认**：
+    # 浏览器里装着的浮窗不会跟着仓库升级，认不出就等于档位失灵
+    for legacy, expected in (("safe", loose), ("conservative", strict)):
+        got = client.post("/advise", json={
+            "session": f"legacy-{legacy}", "state": payload, "options": {"bid": legacy},
+        }).json()
+        assert got["bidding"]["value"] == expected["bidding"]["value"], f"旧档位名 {legacy} 不认了"

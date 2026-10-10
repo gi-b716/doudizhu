@@ -26,7 +26,7 @@ from .state import (
 
 __all__ = [
     "SCHEMA", "Deal", "Event", "RecordResult", "GameRecord", "Decision",
-    "from_finished_state", "replay", "iter_frames", "iter_decisions",
+    "from_finished_state", "replay", "iter_frames", "iter_decisions", "landlord_seat",
     "dedupe_key", "dedupe_key_of",
 ]
 
@@ -193,6 +193,10 @@ class GameRecord:
     rules: str = RULES_TAG
     match: dict | None = None
     result: RecordResult | None = None
+    #: 浮窗的**自述**：引擎、残局模式、自动开关、每手建议、有没有被平台托管。
+    #: 存档里没有这一块的话，"这局面板到底帮没帮上忙"就只能靠推理——
+    #: 真实对局的复盘吃过这个亏（判断"是不是工具的锅"花了好几轮对话）。
+    panel: dict | None = None
 
     # ----------------------------------------------------------------- 基本
 
@@ -232,6 +236,8 @@ class GameRecord:
             "deals": [d.to_dict() for d in self.deals],
             "events": [e.to_dict() for e in self.events],
         }
+        if self.panel is not None:
+            payload["panel"] = self.panel
         return payload
 
     def to_line(self) -> str:
@@ -259,6 +265,7 @@ class GameRecord:
             rules=str(data.get("rules") or RULES_TAG),
             match=data.get("match"),
             result=RecordResult.from_dict(result) if result else None,
+            panel=data.get("panel"),
         )
 
     @classmethod
@@ -322,6 +329,7 @@ def from_finished_state(
     source: str = "platform",
     rules: str = RULES_TAG,
     seat_of_interest: int | None = None,
+    panel: Mapping[str, Any] | None = None,
 ) -> GameRecord:
     """终局平台 state → :class:`GameRecord`（``/ingest`` 与离线归档的入口）。
 
@@ -395,6 +403,7 @@ def from_finished_state(
         rules=rules,
         match=state.get("match"),
         result=RecordResult.from_dict(result_raw) if result_raw else None,
+        panel=dict(panel) if panel else None,
     )
     if not record.game_id:
         record.game_id = f"local-{record.dedupe_key()[:16]}"
@@ -628,3 +637,17 @@ def iter_decisions(
         replayer.advance(entry)
         if entry.kind != "redeal":
             prefix = [*prefix, entry]
+
+
+def landlord_seat(record: GameRecord) -> int | None:
+    """地主座位。优先信 ``landlord`` 事件；缺了就按分差猜（**地主的分永远是农民的两倍**，
+    这是 rules.md 的计分定义）。战报、复盘页、网页牌谱都要用它，所以放在这里共用一份。
+    """
+    for entry in record.events:
+        if entry.kind == "landlord":
+            return entry.seat
+    result = record.result
+    if result is None:
+        return None
+    return result.deltas.index(max(result.deltas) if result.landlord_won
+                               else min(result.deltas))
