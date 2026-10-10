@@ -533,3 +533,35 @@ def test_the_bid_option_survives_the_http_layer(client):
             "session": f"legacy-{legacy}", "state": payload, "options": {"bid": legacy},
         }).json()
         assert got["bidding"]["value"] == expected["bidding"]["value"], f"旧档位名 {legacy} 不认了"
+
+
+def test_userscript_takes_control_back_from_hosting():
+    """被平台托管时要主动点「取消托管」——托管**不会自己结束**，平台会替我们打完整局。
+
+    用户归档的 120 局里 12 局被托管：净 −44 分、−3.67/局，同期自己打的 108 局只有 −0.72/局，
+    其中 11 局是从第一手就被平台机器人代打到结束。0.7.4 及以前的面板只显示「代打让位」，
+    等于把整局让出去。
+    """
+    source = USERSCRIPT.read_text(encoding="utf-8")
+    assert "function cancelHosting()" in source
+    # 只按页面自己的按钮（代打的底线）：平台的切换按钮文本就是「取消托管」
+    assert "text === '取消托管'" in source
+    # 挂在心跳上：状态推不过来时也得能要回控制权
+    assert "if (hostedNow && cancelHosting()) return;" in source
+    # 节流 + 只在「自动打牌」开着时点：手动模式要尊重用户
+    assert "if (!config.auto || !hostedNow) return false;" in source
+    assert "now - lastHostingCancel < HOSTING_RETRY_MS" in source
+    # 自述里要能对账：要回来几次
+    assert "hosting_cancels" in source
+
+
+def test_report_counts_hosting_cancels():
+    """战报要能把「被托管」和「要回来了」分开说，否则复盘时又把锅算到引擎头上。"""
+    from ddz.tools.report import _brief
+
+    brief = _brief({"auto_actions": 2, "auto_passes": 1, "hosted": 4,
+                    "hosting_cancels": 2, "engine": "heuristic"})
+    assert "※托管 4" in brief and "要回 2" in brief
+    # 没有这两项时不要凭空多出字符
+    plain = _brief({"auto_actions": 2, "engine": "heuristic"})
+    assert "托管" not in plain and "要回" not in plain
