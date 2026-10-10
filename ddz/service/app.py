@@ -5,14 +5,16 @@
 是"私有网络"——Chrome 的 Private Network Access 预检要求响应里显式带上
 ``Access-Control-Allow-Private-Network: true``（PLAN §3.5）。
 
-端点：``/health`` ``/advise`` ``/ingest`` ``/config``。**逻辑问题一律 200**：响应里的
-``ok`` 说明成败，脚本不用区分状态码。所有编排都在 :mod:`ddz.service.advisor` 里，这里只做
-HTTP 与参数校验。
+端点：``/health`` ``/advise`` ``/ingest`` ``/config``，以及复盘页那一族
+``/review`` ``/review/games`` ``/review/game/{id}`` ``/review/game/{id}/decision/{i}``
+（挂载见 :mod:`ddz.service.review_api`）。**逻辑问题一律 200**：响应里的 ``ok`` 说明成败，
+脚本不用区分状态码。所有编排都在 :mod:`ddz.service.advisor` 里，这里只做 HTTP 与参数校验。
 """
 
 from __future__ import annotations
 
 import importlib.util
+import os
 import sys
 import time
 from typing import Any
@@ -24,6 +26,7 @@ from fastapi.responses import JSONResponse
 from .. import __version__
 from ..data.archive import Archive
 from .advisor import AdviseOptions, Advisor
+from .review_api import build_router
 from .schemas import (
     AdviseRequest, ConfigRequest, HealthResponse, IngestRequest, IngestResponse,
 )
@@ -36,9 +39,16 @@ PORT = 17876
 
 def create_app(archive: Archive | None = None, advisor: Advisor | None = None) -> FastAPI:
     app = FastAPI(title="ddz-copilot", version=__version__)
-    advisor = advisor if advisor is not None else Advisor(archive=archive)
+    advisor = advisor if advisor is not None else Advisor(
+        archive=archive,
+        endgame_mode=os.environ.get("DDZ_ENDGAME_MODE", "ondemand"),
+        endgame_budget_ms=float(os.environ.get("DDZ_ENDGAME_BUDGET_MS", "250")),
+    )
     app.state.ddz = {"started_at": time.time(), "advisor": advisor}
     app.state.advisor = advisor
+    # 复盘页（/review 一族）：走闭包拿 advisor，不依赖 app.state——路由逻辑在
+    # ddz/service/review_api.py，数据逻辑在 ddz/tools/review.py
+    app.include_router(build_router(advisor))
 
     app.add_middleware(
         CORSMiddleware,
@@ -75,18 +85,16 @@ def create_app(archive: Archive | None = None, advisor: Advisor | None = None) -
                 "auto_engine": status.get("auto_engine"),
                 **({"douzero": "douzero:WP"} if ready else {}),
             },
+            endgame=advisor.endgame_status(),
             uptime_s=status["uptime_s"],
             records=status["records"],
         )
 
     @app.post("/advise")
     def advise(request: AdviseRequest) -> dict[str, Any]:
-        options = AdviseOptions(
-            agent=request.options.agent,
-            top_k=request.options.top_k,
-            deadline_ms=request.options.deadline_ms,
-            for_seat=request.options.for_seat,
-        )
+        # **统一走 from_payload**：以前这里是手工一个个字段抄的，加一个新选项时极易漏掉
+        # （叫分档位就漏过一次：脚本发了、advisor 也实现了，就是没传过去，表现成"选项不起作用"）。
+        options = AdviseOptions.from_payload(request.options.model_dump())
         return advisor.advise(request.session, request.state, options, game_id=request.game_id)
 
     @app.post("/ingest", response_model=IngestResponse)
@@ -94,6 +102,7 @@ def create_app(archive: Archive | None = None, advisor: Advisor | None = None) -
         return advisor.ingest(
             request.state,
             game_id=request.game_id,
+            panel=request.panel,
             captured_at=request.captured_at,
             source=request.source,
             seat_of_interest=request.seat_of_interest,

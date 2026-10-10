@@ -23,6 +23,8 @@ class HealthResponse(BaseModel):
     #: 面板照常出建议，只是 DouZero 永远"未就绪"。一眼看出路径不对，比逐层排查省事得多。
     python: str = ""
     models: dict[str, str] = Field(default_factory=dict)
+    #: 残局求解模式（浮窗要显示它）：{mode, prefetch_budget_ms, sessions_warming}
+    endgame: dict[str, Any] = Field(default_factory=dict)
     uptime_s: float = 0.0
     records: int = 0
 
@@ -36,6 +38,8 @@ class IngestRequest(BaseModel):
 
     state: dict[str, Any]
     game_id: str | None = None
+    #: 浮窗自述（引擎/模式/开关/每手建议/是否被托管）。老脚本不发这个字段，缺省即没有。
+    panel: dict[str, Any] | None = None
     captured_at: float | None = None
     source: str = "platform"
     seat_of_interest: int | None = None
@@ -54,12 +58,19 @@ class IngestResponse(BaseModel):
 
 
 class AdviseOptionsModel(BaseModel):
-    """``/advise`` 的 ``options``（都有默认值，脚本可以只传 state）。"""
+    """``/advise`` 的 ``options``（都有默认值，脚本可以只传 state）。
+
+    **加字段别忘了这里**：pydantic 默认把模型里没有的键丢掉，于是"脚本发了、服务端也实现了、
+    但字段没在模型里"会表现成"这个选项完全不起作用"（叫分档位就是这么被漏过一次）。
+    """
 
     agent: str = "auto"          # auto | heuristic | douzero:WP
     top_k: int = 3
     deadline_ms: int = 400
     for_seat: int | None = None  # 指定替哪一家建议（默认：自己；旁观时是当前出牌者）
+    #: 叫分档位：``loose``（宽，叫得勤）| ``strict``（严，默认，几乎不叫）。旧脚本发的
+    #: ``safe`` / ``conservative`` 也认（映射见 ``ddz.engine.bidding.BID_TIER_ALIASES``）。
+    bid: str = "strict"
 
 
 class AdviseRequest(BaseModel):

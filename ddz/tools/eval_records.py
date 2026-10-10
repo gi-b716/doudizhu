@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Iterable, Sequence
 
 from .. import cards as C
+from ..cards import action_key
 from ..agents.registry import make
 from ..data.archive import Archive
 from ..engine.endgame import solve as endgame_solve, solvable as endgame_solvable
@@ -31,15 +32,7 @@ from ..record import GameRecord, iter_decisions
 __all__ = ["Report", "evaluate"]
 
 
-def action_key(cards) -> tuple[int, ...] | None:
-    """一个动作在**点数**上的身份：``None`` 表示不出。
 
-    花色不参与规则，所以 (3♠,3♥) 和 (3♠,3♣) 是同一个动作。三带一也一样——
-    带 3 还是带 9 是两个不同的动作（后续手牌不同），这里必须分得开，不能只看牌型 key。
-    """
-    if not cards:
-        return None
-    return tuple(sorted(C.rank(card) for card in cards))
 
 
 @dataclass(slots=True)
@@ -140,6 +133,13 @@ def evaluate(
     return report
 
 
+def _cards(cards) -> str:
+    """给人看的牌面（按点数，如 ``10 10``）——``format_cards`` 那个是给平台的牌 id。"""
+    if not cards:
+        return "不出"
+    return " ".join(C.RANK_NAMES[C.rank(c)] for c in C.sort_cards(cards))
+
+
 def _describe(state, solved) -> str:
     from ..explain import describe_move
 
@@ -196,9 +196,9 @@ def _print(report: Report, records: Sequence[GameRecord]) -> None:
     if report.games_with_a_thrown_win:
         print(f"\n有 {len(report.games_with_a_thrown_win)} 局出现过「算得出来能赢、却打丢了」的时刻")
     for example in report.thrown_examples:
-        hand = " ".join(C.format_cards(example["hand"]))
-        human = C.format_cards(example["human"]) or "不出"
-        best = C.format_cards(example["solver"]) or "不出"
+        hand = _cards(example["hand"])
+        human = _cards(example["human"])
+        best = _cards(example["solver"])
         print(
             f"  · 第 {example['game_id']} 局 {example['seat']} 号位：手牌 {hand}｜"
             f"实际 {human}｜求解器 {best}（{example['description']}）"

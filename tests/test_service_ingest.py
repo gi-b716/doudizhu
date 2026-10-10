@@ -146,3 +146,39 @@ def test_health_says_which_python_it_runs_on(client):
     body = client.get("/health").json()
     assert body["python"] == sys.executable
     assert body["python"]
+
+
+def test_panel_self_report_is_archived(client, tmp_path):
+    """浮窗的**自述**要能存下来：引擎、模式、开关、每手建议、有没有被平台托管。
+
+    这一块是被真实对局的复盘逼出来的：存档里没有它，"这局面板到底帮没帮上忙"就只能靠推理
+    （判断"是不是工具的锅"花了好几轮）。有了它，一条记录就能回答。
+    """
+    state = play_game(random.Random(3))[-1]
+    panel = {
+        "script": "0.5.3", "engine": "douzero", "auto": True, "auto_continue": True,
+        "endgame_mode": "prefetch", "auto_actions": 12, "hosted": 1,
+        "decisions": [{"v": 7, "cards": [3, 7], "source": "douzero", "engine": "douzero:WP",
+                       "solver": 1, "ms": 12}],
+    }
+    body = client.post("/ingest", json={
+        "state": state, "game_id": "p1", "panel": panel,
+    }).json()
+    assert body["ok"] is True and body["added"] is True
+
+    from ddz.record import GameRecord
+
+    saved = GameRecord.from_line((tmp_path / "games.jsonl").read_text(encoding="utf-8").strip())
+    assert saved.panel == panel
+    assert saved.panel["hosted"] == 1, "平台托管了几次，一眼可见"
+
+
+def test_ingest_without_a_panel_block_still_works(client, tmp_path):
+    """老脚本不发 panel —— 存档照旧（字段缺省即可）。"""
+    state = play_game(random.Random(4))[-1]
+    body = client.post("/ingest", json={"state": state, "game_id": "p2"}).json()
+    assert body["ok"] is True
+    from ddz.record import GameRecord
+
+    saved = GameRecord.from_line((tmp_path / "games.jsonl").read_text(encoding="utf-8").strip())
+    assert saved.panel is None

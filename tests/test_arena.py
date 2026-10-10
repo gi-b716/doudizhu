@@ -307,7 +307,7 @@ def test_douzero_agent_is_built_once_per_match_not_once_per_game(monkeypatch):
     assert metrics.summary(meta={}, include_games=False)  # 结果照常出
 
 
-def test_match_cli_passes_bid_thresholds_to_heuristic_and_douzero_only(tmp_path, capsys):
+def test_match_cli_passes_thresholds_to_heuristic_and_douzero_only(tmp_path, capsys):
     from ddz.arena import match as match_module
 
     seen = []
@@ -330,4 +330,4 @@ def test_match_cli_passes_bid_thresholds_to_heuristic_and_douzero_only(tmp_path,
         mp.undo()
     kwargs = seen[0]
     assert set(kwargs) == {"heuristic"}                  # random 不接收叫分门槛
-    assert kwargs["heuristic"]["bid_thresholds"].three == 10.0
+    assert kwargs["heuristic"]["thresholds"].three == 10.0

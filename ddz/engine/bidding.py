@@ -5,8 +5,18 @@ PLAN §3.3 的公式（见 :func:`ddz.engine.decomposer.hand_strength`）::
     hand_strength = 2.2·#王 + 1.4·#2 + 0.8·#A + 3.0·#炸 + 4.0·王炸
                     + (17 − 3.2·手数) + 0.5·顺子加成
 
-阈值按**期望收益**定，再用竞技场验证（见 :data:`THRESHOLDS` 的注释）。旧版是按「叫分频率」
-校准的（让约 45% 的手牌够叫 1 分），目标本身就错：叫 1、2 分的地主实际只赢 34% / 39%。
+阈值是**用竞技场校准**出来的（见 :data:`THRESHOLDS` 与 :data:`CONSERVATIVE_THRESHOLDS`
+的注释），不是拍脑袋：先按公式在 10 万手随机牌上取分位数，再看自对弈里叫分是否合理。
+
+两个档位只有两个词：**宽**（阈值低、叫得勤）与**严**（阈值高、几乎不叫）——
+名字说的是阈值高低，不是"态度"。中文只从 :func:`tier_label` 出，别处别再起名字。
+
+**为什么"抬高阈值"是对的方向**（期望收益口径，见 :data:`CONSERVATIVE_THRESHOLDS` 的实测）：
+地主赢拿 ``2 × 底分 × 倍数``、两个农民各输 ``底分 × 倍数``，所以地主这一局的期望
+≈ ``2 · 叫分 · 倍数 · (2P − 1)``，P 是地主胜率。叫分只是乘数，**符号完全由 P 决定**；
+在这个打法下 P 长期低于 0.5（宽档自对弈里地主只赢 43%），所以"少当地主"就是省钱。
+推论：一旦 P > 0.5，叫 3 分的收益永远是叫 1 分的 3 倍——1、2 分只在 P 恰好压在 0.5 附近
+那条窄带里才有意义，宽档 6000 局实测那条带是负的（叫 1 分地主胜率 34%、叫 2 分 39%）。
 
 ``must_bid``（连续流局 3 次后本轮最后一位）强制 ≥1，理由里点明原因——rules.md 的规则，
 不是我们的偏好。
@@ -23,20 +33,80 @@ from ..explain import (
 from .base import Bid
 from .decomposer import best_decomposition, hand_strength
 
-__all__ = ["THRESHOLDS", "BidThresholds", "as_thresholds", "parse_thresholds", "bid_for", "strength_of"]
+__all__ = [
+    "THRESHOLDS", "CONSERVATIVE_THRESHOLDS", "BID_TIERS", "BID_TIER_ALIASES",
+    "DEFAULT_BID_TIER", "BidThresholds", "as_thresholds", "parse_thresholds",
+    "bid_for", "strength_of", "thresholds_of_tier", "tier_of", "tier_label",
+]
 
-#: (叫 1 / 2 / 3 分) 的牌力阈值。**三档必须相同**，理由与实测：
+#: **宽档**（阈值低、叫得勤）：20000 手随机 17 张实测 57.4% 不叫、24.5% 叫 1、12.9% 叫 2、5.2% 叫 3。
 #:
-#: - 叫分的期望收益是 ``2 · 叫分 · 倍数 · (2P − 1)``，P 为地主胜率。叫分只是乘数，
-#:   符号完全由 P 决定；P > 0.5 时叫 3 分的收益永远是叫 1 分的 3 倍，所以 1、2 分没有保留的理由。
-#: - 竞技场实测（旧阈值三家自对弈 6000 局）：叫 1 分的地主胜率 34%、叫 2 分 39%，地主 ADP 分别
-#:   −0.72 / −1.00，都是明显负期望；叫 3 分的地主胜率约 49%。叫 3 分的门槛用 6 时，牌力 [10,12)
-#:   段的地主 ADP 才明显转正（+1.2），所以门槛取 10。
-#: - 相对旧阈值 (−2, 2, 6) 的 ADP 增益（配对种子）：1 个候选 vs 2 个旧版 +0.33 ±0.07（换种子 9000
-#:   为 +0.43 ±0.07）；2 个候选 vs 1 个旧版 +0.35 ±0.05。门槛 8～12 是平台期，取偏保守的 10。
-#: - 局限：这些增益是对**旧式桌**（会乱叫 1、2 分）测的。若三家都用本门槛，约 90% 的局会走到
-#:   「连续流局 3 次后强制叫分」，那时 10 对 6 没有可测差别（−0.05 ±0.08，6 对 10 为 −0.11 ±0.10）。
-THRESHOLDS: tuple[float, float, float] = (10.0, 10.0, 10.0)
+#: 定档方式：先按公式在 10 万手随机牌上取分位数——p55 ≈ −2.1、p82 ≈ +2.0、p94 ≈ +5.8，
+#: 取整后让约 45% / 18% / 6% 的手牌够叫 1 / 2 / 3 分（三人全不叫的概率约 17%，
+#: 与实际对局里偶尔流局同量级）。
+#:
+#: 它是**库的默认**（`BidThresholds()`、竞技场自对弈都跑这一档），**不是产品的默认**——
+#: 产品（浮窗/服务）默认跑 :data:`CONSERVATIVE_THRESHOLDS`。两个词各指一档，别混用：
+#: 宽 = 阈值低 = 叫得勤，严 = 阈值高 = 几乎不叫。
+#:
+#: 宽档就是"旧式桌"：三家自对弈 6000 局（seed 5000）按最终底分分组——底分 1 地主胜率 34.2%
+#: （ADP −0.72）、底分 2 为 39.0%（−1.00）、底分 3 为 49.3%（+0.33）。也就是说自愿叫 1、2 分
+#: 是明显负期望，只有叫 3 分勉强打平：这正是严档存在的理由。
+THRESHOLDS: tuple[float, float, float] = (-2.0, 2.0, 6.0)
+
+
+#: **严档**（阈值整体上移，几乎不主动叫地主）：89.5% 不叫、7.9% 叫 1、2.1% 叫 2、0.4% 叫 3。
+#: **浮窗与服务默认这一档**（面板上写「叫分 严」）。
+#:
+#: **是量出来的，不是拍的**：一桌一个候选叫分者 vs 两个默认叫分者，轮换座位 800 局比 ADP——
+#:
+#:     (-2, 2, 6) 宽档   +0.033 分/局   当地主时胜率 42.8%
+#:     ( 0, 4, 8)        +0.236         47.2%
+#:     ( 2, 6,10)        +0.275         50.4%
+#:     ( 4, 8,12) 严档   +0.309         52.6%   ← 平台期，取它
+#:     ( 8,12,16)        +0.318         40.7%
+#:
+#: **反方向（阈值再降、叫得更勤）是单调变差的**：(-4,0,4) → −0.219、(-6,-1,3) → −0.507。
+#: 原因很直白：**在这个打法下当地主本来就低于五成胜率**（42.8%），多抢地主就是多送分。
+#: 顺带一提，用户真实对局里当地主也是 42%（5/12），和这个数字吻合。
+CONSERVATIVE_THRESHOLDS: tuple[float, float, float] = (4.0, 8.0, 12.0)
+
+#: 档位的**唯一命名处**：库里的 id（``loose``/``strict``）↔ 面板上的字（「宽」/「严」）↔ 旧脚本发过的别名。
+#:
+#: 别在别处再写一份中文：叫分档位曾经在两个文件里被叫成「稳健」和「保守」——
+#: 两个词在中文里是近义词，浮窗上两个按钮看着一模一样。**宽/严对应的是阈值高低**，
+#: 一眼能分，也就不会再有人问"这俩有区别吗"。
+BID_TIERS: dict[str, str] = {"loose": "宽", "strict": "严"}
+
+#: 旧脚本（≤0.7.3）发的是 ``safe`` / ``conservative``，**必须一直认**：
+#: 浏览器里装着的旧浮窗不会跟着仓库升级，服务端装作看不见就等于档位失灵
+#: （历史上就这么失灵过一次，见 tests/test_service_advise.py 的 HTTP 那条）。
+BID_TIER_ALIASES: dict[str, str] = {
+    "loose": "loose", "safe": "loose", "wide": "loose",
+    "strict": "strict", "conservative": "strict",
+}
+
+#: 认不出或没给时的档位——产品的默认档，也是这里唯一允许写死的默认值。
+DEFAULT_BID_TIER = "strict"
+
+
+def tier_of(value: object) -> str:
+    """任意写法（``loose``/``strict``/``safe``/``conservative``/带空格的大小写）→ 档位 id。
+
+    认不出的一律落到 :data:`DEFAULT_BID_TIER`——不报错：这条路上报错等于浮窗叫不了分。
+    """
+    return BID_TIER_ALIASES.get(str(value or "").strip().lower(), DEFAULT_BID_TIER)
+
+
+def tier_label(value: object) -> str:
+    """档位 → 面板上的字（「宽」/「严」）。中文只在这里生成一份，别处不许再写。"""
+    return BID_TIERS[tier_of(value)]
+
+
+def thresholds_of_tier(value: object) -> "BidThresholds":
+    """档位 → 阈值组。**每个档位都要显式给阈值**，别靠 ``BidThresholds()`` 的默认——
+    库默认是宽档，产品默认是严档，靠默认会静默错一档。"""
+    return BidThresholds(*(CONSERVATIVE_THRESHOLDS if tier_of(value) == "strict" else THRESHOLDS))
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,13 +127,32 @@ def as_thresholds(value) -> BidThresholds | None:
 
 
 def parse_thresholds(text: str) -> BidThresholds:
-    """命令行写法：``10`` 表示三档都是 10；``6,8,10`` 表示依次是叫 1 / 2 / 3 分的门槛。"""
-    parts = [part.strip() for part in str(text).split(",") if part.strip()]
+    """命令行写法：档位名或阈值。
+
+    - 档位名：``strict`` / ``loose``（也认面板上的「严」/「宽」和旧脚本的别名）；
+    - 阈值：``10`` 表示三档都是 10，``4,8,12`` 表示依次是叫 1 / 2 / 3 分的门槛。
+
+    这里是**命令行**，写错就该报错——别用 :func:`tier_of`（它对认不出的词静默落到默认档，
+    那是给浮窗用的容错；在 CLI 上静默改档等于测错了东西还不知道）。
+    """
+    raw = str(text).strip()
+    if not raw:
+        raise ValueError("叫分门槛不能为空")
+    lowered = raw.lower()
+    if lowered in BID_TIER_ALIASES:
+        return thresholds_of_tier(lowered)
+    labels = {label: tier for tier, label in BID_TIERS.items()}
+    if raw in labels:
+        return thresholds_of_tier(labels[raw])
+    parts = [part.strip() for part in raw.split(",") if part.strip()]
     if len(parts) == 1:
         parts = parts * 3
     if len(parts) != 3:
-        raise ValueError(f"叫分门槛要么一个数，要么三个数（叫 1/2/3 分）：{text!r}")
-    return as_thresholds(parts)
+        raise ValueError(f"叫分门槛要么是档位名（{'/'.join(BID_TIERS)}），要么一个数，要么三个数：{text!r}")
+    try:
+        return as_thresholds(parts)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"叫分门槛得是数字：{text!r}") from exc
 
 
 def strength_of(hand) -> float:

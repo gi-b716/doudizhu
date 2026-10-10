@@ -27,7 +27,10 @@ from ..moves import Move, legal_moves
 from ..patterns import Pattern
 from ..state import PHASE_PLAYING, SEATS, GameState
 
-__all__ = ["SolveResult", "Limits", "solvable", "solve", "is_endgame", "candidate_from"]
+__all__ = [
+    "SolveResult", "Limits", "solvable", "uncertain_solvable", "solve", "solve_uncertain",
+    "is_endgame", "candidate_from",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,13 +41,43 @@ class Limits:
     只卡单个的话，"三家各 8 张"这种会直接爆掉。
     """
 
-    #: 单人最多几张、总共最多几张。**实测定的**（随机残局 30 例）：
-    #: 总 12 张最慢 37ms、14 张最慢 114ms、16 张最慢 725ms——服务端 deadline 默认 400ms，
-    #: 所以卡在 14。多放两张就会经常性超时回落，白烧 CPU 还拖住线程池。
-    max_cards: int = 10
-    max_total: int = 14
-    #: 搜索节点上限。超了就返回"没搜完"，由调用方回落到启发式（绝不猜）。
-    max_nodes: int = 120_000
+    #: **看不见别家手牌时用这个门槛**：未见牌（对手手里那些我还不知道的牌）最多几张。
+    #: 这才是真正该卡的量——**不确定性有多大**，而不是"牌有多少"。
+    #: 未见牌 u 张要枚举"从中挑 n 张给对手"的所有可能，u=8 时最坏 70 种、u=10 时 252 种；
+    #: 每种都要搜一遍，所以卡在 8（配合时间预算兜底）。
+    max_unseen: int = 8
+
+    #: 单人最多几张、总共最多几张、以及搜索节点上限。
+    #:
+    #: **总张数放到 20 是吃过教训的**：一开始卡在 14（随机残局实测 14 张最慢 114ms、
+    #: 16 张 725ms，而服务端 deadline 是 400ms）。但真实对局里出现过这样一手——地主手里
+    #: 只剩一对 K（2 张），我 10 张、队友 8 张，共 20 张。**总张数超了，求解器就没介入**，
+    #: 结果 DouZero 领出一对 10（把牌权递给只剩两张的地主，他 KK 压上直接走完），
+    #: 而求解器 2557 个节点就能证明：这个局面农民**能赢**，赢法是领出任意一张单牌。
+    #: 也就是说阈值把它挡在了"本可以算清、而且不算贵"的残局之外。
+    #:
+    #: 所以现在的口径是：**张数放宽 + 节点预算兜底**。张数只用来排除明显不是残局的局面，
+    #: 真正防爆的是 ``max_nodes``——超了照样如实回"没搜完"，由调用方回落，绝不猜。
+    max_cards: int = 12
+    max_total: int = 20
+    #: 在能赢的着法里，优先挑"**队友乱打也照样赢**"的那种：最多试前几个（0 = 不试）。
+    solo_scan: int = 3
+    #: 上面那一步的**节点预算**：用节点而不是时间。时间预算会让同一个局面两次问出不同首选
+    #: （实测踩到了——记忆表复用的测试因此翻过车），而"首选会随机变"是不能接受的。
+    solo_nodes: int = 10_000
+    #: 保留字段（历史上曾是时间上限）。**现在 solo 那一步只看 ``solo_nodes``**：
+    #: 时间预算会让同一局面两次给出不同首选，而首选不能随机变。
+    solo_budget_ms: float = 300.0
+    #: 结论已经在手、只差"挑哪一手"时额外给的时间（毫秒）。
+    #: 排根节点着法通常是一堆记忆表命中，很快；但**不能因为预算小就把已经算出来的结论丢掉**，
+    #: 所以这一段单独给一点时间。
+    rank_budget_ms: float = 50.0
+    #: 搜索节点上限（粗粒度防爆）。
+    max_nodes: int = 400_000
+    #: **墙钟预算**（毫秒）。真正卡住延迟的是这个：节点的代价差得很远（有的几千节点几毫秒，
+    #: 有的几万节点就几秒），光卡节点数卡不住。加到一条建议上的时间绝不会超过它。
+    #: 超时/超节点都返回"没搜完"，由调用方回落到引擎（绝不猜）。
+    time_budget_ms: float = 250.0
 
 
 DEFAULT_LIMITS = Limits()
@@ -66,6 +99,10 @@ class SolveResult:
     exhausted: bool = False
     #: 所有能保住结论的动作（按"代价小"排序，出牌排在"不出"前面）；``None`` 元素即"不出"
     best_moves: list[Move | None] | None = None
+    #: 推荐的那一手是不是**不依赖队友**（队友乱打也照样赢）。只在证明为必胜时有意义。
+    solo: bool = False
+    #: 这个结论覆盖了多少种"对手手牌的可能分配"（1 = 手牌全知道，只有一个世界）。
+    worlds: int = 1
 
     @property
     def proved(self) -> bool:
@@ -106,6 +143,9 @@ class _Search:
     memo: dict
     nodes: int = 0
     max_nodes: int = 200_000
+    deadline: float = float("inf")
+    #: "我"坐哪儿——判定"队友乱打也赢"时要把阵营缩成我一个人
+    me: int = -1
     #: 下面两张表纯属提速：合法着法只取决于（手牌, 要压的牌型），点数只取决于手牌，
     #: 都是纯函数，而这两样在全树里会被反复问到——实测这是搜索的主要开销。
     moves: dict = field(default_factory=dict)
@@ -157,7 +197,7 @@ def _value(ctx: _Search, hands, to_beat: Pattern | None, turn: int, passes: int)
         return hit
 
     ctx.nodes += 1
-    if ctx.nodes > ctx.max_nodes:
+    if ctx.nodes > ctx.max_nodes or time.perf_counter() > ctx.deadline:
         raise _Exhausted
 
     mine = _on_side(turn, ctx.side)
@@ -201,9 +241,15 @@ def solve(
     *,
     limits: Limits = DEFAULT_LIMITS,
     seat: int | None = None,
+    memo: dict | None = None,
+    time_budget_ms: float | None = None,
 ) -> SolveResult:
-    """解这个残局。``seat`` 默认用 ``state.advise_seat``（我要不要赢）。"""
-    started = time.perf_counter()
+    """解这个残局。``seat`` 默认用 ``state.advise_seat``（我要不要赢）。
+
+    ``memo`` 可以传一张**外部记忆表**进来复用（预取用）：表中存的全是**算完的**结论
+    （没算完的绝不会写进去，见 :func:`_value`），所以复用只可能让搜索更快，不可能让它变错。
+    残局越打越小，我后面每一手都是前面那棵树的后代——同一棵树接着搜，几乎全命中。
+    """
     me = state.advise_seat if seat is None else seat
     if me is None or state.landlord is None:
         return SolveResult()
@@ -214,17 +260,48 @@ def solve(
     side = frozenset({state.landlord}) if me == state.landlord else frozenset(
         s for s in SEATS if s != state.landlord
     )
-    ctx = _Search(side=side, memo={}, max_nodes=limits.max_nodes)
-    to_beat = state.to_beat
-    passes = _passes_behind(state)
+    return _solve_hands(
+        hands, side, me, state.to_beat, state.turn, _passes_behind(state),
+        limits=limits, memo=memo, time_budget_ms=time_budget_ms,
+    )
+
+
+def _solve_hands(
+    hands, side, me, to_beat, turn: int, passes: int,
+    *, limits: Limits, memo: dict | None = None, time_budget_ms: float | None = None,
+    deadline: float | None = None, overall_deadline: float | None = None,
+) -> SolveResult:
+    """已知三家手牌时的搜索内核（``solve`` 与"未知手牌"那条路共用）。"""
+    started = time.perf_counter()
+    ctx = _Search(
+        side=side, memo=memo if memo is not None else {}, max_nodes=limits.max_nodes,
+        deadline=deadline if deadline is not None else (
+            started + (time_budget_ms if time_budget_ms is not None
+                       else limits.time_budget_ms) / 1000.0),
+        me=me,
+    )
 
     try:
-        winning = _value(ctx, hands, to_beat, state.turn, passes)
+        winning = _value(ctx, hands, to_beat, turn, passes)
     except _Exhausted:
         return SolveResult(nodes=ctx.nodes, exhausted=True,
                            elapsed_ms=(time.perf_counter() - started) * 1000.0)
 
-    best = _rank_root_moves(ctx, hands, to_beat, state.turn, passes, winning)
+    # 排着法另给一点时间（见 Limits.rank_budget_ms）：结论已经确定了，别在这儿丢掉它。
+    # 但**不许超过总期限**——多世界枚举时每个世界都排一次，不共享上限就会叠成好几秒。
+    ctx.deadline = time.perf_counter() + limits.rank_budget_ms / 1000.0
+    if overall_deadline is not None:
+        ctx.deadline = min(ctx.deadline, overall_deadline)
+    try:
+        best = _rank_root_moves(ctx, hands, to_beat, turn, passes, winning)
+    except _Exhausted:
+        # 结论算出来了、但"哪些着法能保住它"没排完。**不许含糊**：宁可当作没搜完，
+        # 也不能返回 winning=True 配一个 move=None——那会被当成"不出才是最优"。
+        return SolveResult(nodes=ctx.nodes, exhausted=True,
+                           elapsed_ms=(time.perf_counter() - started) * 1000.0)
+    solo = False
+    if winning and best:
+        best, solo = _prefer_solo(ctx, hands, to_beat, turn, best, limits)
     return SolveResult(
         winning=winning,
         # 可能是 None：那表示"不出"才是最优（跟 winning is None 的"没搜完"不是一回事）
@@ -232,7 +309,50 @@ def solve(
         nodes=ctx.nodes,
         elapsed_ms=(time.perf_counter() - started) * 1000.0,
         best_moves=best if winning else [],
+        solo=solo,
     )
+
+
+def _prefer_solo(ctx: _Search, hands, to_beat, turn, moves, limits) -> tuple[list, bool]:
+    """在能赢的着法里，把"**队友乱打也照样赢**"的挪到最前面，返回 (新顺序, 首选是否 solo)。
+
+    为什么要这一步：证明里的"必胜"是**两个农民配合**的必胜。队友不按剧本走，证明就失效。
+    而真人队友（乃至一个启发式队友）恰恰不会按剧本走。所以：把我一个人当主角再搜一遍，
+    **队友当对手**——要是这样都赢，那这一手谁来都拦不住，最稳。
+
+    只在我是农民时有意义（地主没有队友，直接跳过）。最多试前 ``solo_scan`` 个，试到第一个就停；
+    一个都没有就保持原样（仍然是必胜，只是需要一个配合的队友）。
+    """
+    if len(ctx.side) == 1 or limits.solo_scan <= 0:   # 我是地主：没有队友这回事
+        return moves, False
+    # **只看节点，不看时间**：这里用时间做过，同一局面两次会给出不同首选（测试当场抓到），
+    # 而"首选会随机变"是不能接受的。10k 节点约合 10~100ms，本来就有界。
+    deadline = float("inf")
+    for index, move in enumerate(moves[: limits.solo_scan]):
+        if move is None:            # "不出"照样要判：它也可能是最稳的那个
+            rest = hands[turn]
+        else:
+            rest = tuple(card for card in hands[turn] if card not in set(move.cards))
+        if not rest:
+            solo = True             # 一把走完，谁也拦不住
+        else:
+            solo_ctx = _Search(
+                side=frozenset({ctx.me}), memo={}, max_nodes=limits.solo_nodes,
+                deadline=deadline, me=ctx.me,
+            )
+            try:
+                solo = _value(
+                    solo_ctx,
+                    _replace(hands, turn, rest),
+                    move.pattern if move is not None else to_beat,
+                    (turn + 1) % 3, 0,
+                )
+            except _Exhausted:
+                break
+            ctx.nodes += solo_ctx.nodes      # 记账要算上这一段
+        if solo:
+            return [move, *moves[:index], *moves[index + 1:]], True
+    return moves, False
 
 
 def _passes_behind(state: GameState) -> int:
@@ -288,7 +408,7 @@ def candidate_from(result: SolveResult):
 
     move = result.move
     reason = reason_solver_pass() if move is None else reason_solver_win(
-        describe_move(move), result.nodes
+        describe_move(move), result.nodes, solo=result.solo, worlds=result.worlds
     )
     alternatives = [
         Candidate(other, 1.0, ["残局求解：这样走同样必胜"], ["solver"], "solver", win_prob=1.0)
@@ -299,3 +419,152 @@ def candidate_from(result: SolveResult):
         move, 1.0, [reason], ["solver", "proved:win"], "solver",
         win_prob=1.0, alternatives=alternatives,
     )
+
+
+# --------------------------------------------------------------------- 看不见别家手牌时
+
+
+def uncertain_solvable(state: GameState, limits: Limits = DEFAULT_LIMITS) -> bool:
+    """**看不见别家手牌**时能不能算：出牌阶段、知道各家张数、未见牌够少。
+
+    门槛卡的是**未见牌张数**，不是总张数——真正决定代价的是"不确定性有多大"。
+    未见牌 u 张时，要枚举"从中挑 n 张给对手"的所有可能：u=8 最坏 70 种、u=10 是 252 种。
+    """
+    me = state.advise_seat
+    if state.phase != PHASE_PLAYING or state.landlord is None or state.turn is None or me is None:
+        return False
+    return len(state.unseen_for(me)) <= limits.max_unseen
+
+
+def solve_uncertain(
+    state: GameState, *, limits: Limits = DEFAULT_LIMITS, seat: int | None = None,
+) -> SolveResult:
+    """看不到别家手牌时的求解：**对一切可能的分配都赢**，才算必胜。
+
+    为什么是"对一切分配"而不是"猜一个最像的"：猜出来的只能叫估计，而我们本来就有一个很强的
+    估计器（DouZero）。这里要的是**证明**——所以只要有一种与已知信息一致的分配能让对手赢，
+    就不算数。结论因此特别硬：**无论牌怎么分、无论谁怎么打，我都赢**。
+
+    队友也一视同仁当对手：真人队友不会按剧本走，"需要队友配合"的赢法在实战里不算赢
+    （和 :func:`_prefer_solo` 同一套理由）。所以这里的"我方"只有我自己。
+    """
+    started = time.perf_counter()
+    me = state.advise_seat if seat is None else seat
+    if me is None or state.landlord is None or state.turn is None:
+        return SolveResult()
+    mine = state.hand_for(me)
+    if mine is None:
+        return SolveResult()
+
+    others = [s for s in SEATS if s != me]
+    unseen = [_rank_of(card) for card in state.unseen_for(me)]
+    sizes = {s: state.counts[s] for s in others}
+    if len(unseen) != sum(sizes.values()):        # 张数对不上就不猜（比如还有没亮出来的底牌）
+        return SolveResult()
+    if len(unseen) > limits.max_unseen:
+        return SolveResult()
+
+    deadline = started + limits.time_budget_ms / 1000.0
+    to_beat, passes = state.to_beat, _passes_behind(state)
+    side = frozenset({me})                        # 队友也是对手（见 docstring）
+    first, second = others
+    total = 0
+    alive: list | None = None                     # 所有世界都能赢的着法（交集）
+    nodes = 0
+
+    for hand_first in _sub_multisets(unseen, sizes[first]):
+        rest = _subtract(unseen, hand_first)
+        hands = _hands_for(me, mine, first, hand_first, second, rest)
+        result = _solve_hands(
+            hands, side, me, to_beat, state.turn, passes,
+            limits=limits, deadline=deadline, overall_deadline=deadline,
+        )
+        total += 1
+        nodes += result.nodes
+        if result.winning is not True or not result.best_moves:
+            return SolveResult(nodes=nodes, worlds=total, exhausted=result.winning is None,
+                               elapsed_ms=(time.perf_counter() - started) * 1000.0)
+        if alive is None:
+            alive = list(result.best_moves)
+        else:
+            keys = {_move_key(m) for m in result.best_moves}
+            alive = [m for m in alive if _move_key(m) in keys]
+            if not alive:
+                return SolveResult(nodes=nodes, worlds=total,
+                                   elapsed_ms=(time.perf_counter() - started) * 1000.0)
+
+    if not total or alive is None:
+        return SolveResult()
+    return SolveResult(
+        winning=True,
+        move=alive[0],                            # 可能是 None：那表示"不出"在所有世界里都最优
+        nodes=nodes,
+        elapsed_ms=(time.perf_counter() - started) * 1000.0,
+        best_moves=alive,
+        solo=True,                                # 这个结论本来就比 solo 还硬
+        worlds=total,
+    )
+
+
+def _rank_of(card: int) -> int:
+    return C.rank(card)
+
+
+def _hands_for(me: int, mine, first: int, hand_first, second: int, hand_second):
+    """按座位摆好三家手牌（点数多重集 → 具体牌号；花色不影响规则）。"""
+    by_seat = {me: list(mine), first: _ids_from_ranks(hand_first), second: _ids_from_ranks(hand_second)}
+    return tuple(tuple(sorted(by_seat[s])) for s in SEATS)
+
+
+def _ids_from_ranks(ranks) -> list[int]:
+    """点数多重集 → 具体牌号（同点数依次取不同花色；大小王各只有一张）。"""
+    used: dict[int, int] = {}
+    out: list[int] = []
+    for rank in sorted(ranks):
+        index = used.get(rank, 0)
+        used[rank] = index + 1
+        out.append(C.JOKER_SMALL + index if rank >= C.JOKER_RANK else rank * 4 + index)
+    return out
+
+
+def _subtract(pool, taken) -> list[int]:
+    """``pool`` 里去掉 ``taken`` 剩下的（多重集差）。"""
+    rest = list(pool)
+    for rank in taken:
+        rest.remove(rank)
+    return rest
+
+
+def _move_key(move) -> tuple | None:
+    from ..cards import action_key
+
+    return None if move is None else action_key(move.cards)
+
+
+def _sub_multisets(pool, size: int):
+    """``pool``（点数多重集）里所有大小为 ``size`` 的子多重集。
+
+    只看点数、不看花色：花色不参与任何规则，同一个点数组合的两种花色分法是同一个世界。
+    """
+    from collections import Counter
+
+    counts = Counter(pool)
+    ranks = sorted(counts)
+    chosen: dict[int, int] = {}
+
+    def rec(index: int, need: int):
+        if need == 0:
+            out: list[int] = []
+            for rank in ranks:
+                out.extend([rank] * chosen.get(rank, 0))
+            yield tuple(out)
+            return
+        if index >= len(ranks):
+            return
+        rank = ranks[index]
+        for take in range(min(counts[rank], need) + 1):
+            chosen[rank] = take
+            yield from rec(index + 1, need - take)
+        chosen.pop(rank, None)
+
+    yield from rec(0, size)

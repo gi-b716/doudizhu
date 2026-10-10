@@ -108,12 +108,15 @@ class HeuristicAgent:
 
     name = "heuristic"
 
-    def __init__(self, weights: Weights | None = None, *, bid_thresholds=None) -> None:
+    def __init__(self, weights: Weights | None = None, thresholds=None) -> None:
         from .bidding import as_thresholds
 
         self.weights = weights or DEFAULT_WEIGHTS
-        #: 叫分门槛；``None`` 用 :data:`ddz.engine.bidding.THRESHOLDS`。竞技场 A/B 时用来换门槛
-        self.bid_thresholds = as_thresholds(bid_thresholds)
+        #: 叫分阈值。``None`` = 库默认的**宽档**（阈值低、叫得勤，竞技场校准的基准）；
+        #: 产品（浮窗/服务）默认走**严档**，由调用方显式传进来——
+        #: 用 :func:`ddz.engine.bidding.thresholds_of_tier` 拿，别自己拼 ``BidThresholds()``。
+        #: 也接受三元组/字典（竞技场 A/B 与 ``--bid-thresholds`` 会这么传），这里统一成对象。
+        self.thresholds = as_thresholds(thresholds)
 
     # ----------------------------------------------------------------- 出牌
 
@@ -408,7 +411,7 @@ class HeuristicAgent:
             high_bid=state.high_bid,
             must_bid=state.must_bid,
             legal=state.legal_bids,
-            thresholds=self.bid_thresholds,
+            thresholds=self.thresholds,
         )
 
 

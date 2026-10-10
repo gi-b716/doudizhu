@@ -6,13 +6,16 @@ import pytest
 
 import random
 
-from ddz.engine.bidding import THRESHOLDS, BidThresholds, bid_for, strength_of
+from ddz.engine.bidding import (
+    CONSERVATIVE_THRESHOLDS, THRESHOLDS, BidThresholds, bid_for, strength_of,
+    thresholds_of_tier,
+)
 from ddz.engine.heuristic import HeuristicAgent
 from ddz.state import PHASE_BIDDING
 from helpers import cards_of, game_state, random_hand
 
-#: 这三手牌的牌力分（实测）：+21.1 / +4.3 / −5.1。STRONG 过 10 分门槛；MEDIUM 在旧阈值下
-#: 会叫 2 分（而叫 2 分的地主实测只赢 39%），现在不叫；WEAK 不叫。
+#: 这三手牌的牌力分（实测）：+21.1 / +4.3 / −5.1。STRONG 两档都叫 3 分；MEDIUM 在**宽档**
+#: （库默认）叫 2 分、在**严档**（产品默认）只叫 1 分；WEAK 两档都不叫。
 STRONG = "小王 大王 2 2 2 A 3 3 3 3 4 5 6 7 8 9"           # 王炸 + 三个 2 + 炸弹
 MEDIUM = "小王 大王 3 3 4 5 5 6 7 7 8 9 10 10 J Q A"        # 中等：一对王但没有 2
 WEAK = "3 3 4 5 5 7 8 8 9 10 J J Q Q K A 小王"              # 弱：全散牌，手数多
@@ -29,7 +32,7 @@ def test_strength_ordering():
 
 def test_bid_levels_track_the_thresholds():
     assert bid_for(cards_of(STRONG)).value == 3
-    assert bid_for(cards_of(MEDIUM)).value == 0   # 回归：旧阈值会在这里叫 2 分（胜率 39%，负期望）
+    assert bid_for(cards_of(MEDIUM)).value == 2   # 库默认是宽档；产品默认严档见下面那组测试
     assert bid_for(cards_of(WEAK)).value == 0
     # 阈值与档位一一对应（换阈值就该换档）
     for spec in (STRONG, MEDIUM, WEAK):
@@ -37,21 +40,29 @@ def test_bid_levels_track_the_thresholds():
         assert bid_for(hand).value == expected_level(strength_of(hand))
 
 
-def test_default_thresholds_are_equal_so_no_voluntary_one_or_two():
-    """1、2 分的期望收益为负（实测地主胜率 34% / 39%），而收益正比于叫分，所以 1、2 分没有保留的理由。"""
-    assert len(set(THRESHOLDS)) == 1, "三档阈值应当相同：1、2 分不能比 3 分更容易叫"
+def test_strict_tier_raises_every_line_above_loose():
+    """严档三条线都要比宽档高（这是"严"的全部含义），两端的手牌结论不变。"""
+    loose, strict = thresholds_of_tier("loose"), thresholds_of_tier("strict")
+    assert (strict.one, strict.two, strict.three) == CONSERVATIVE_THRESHOLDS
+    assert all(s > l for s, l in zip(CONSERVATIVE_THRESHOLDS, THRESHOLDS))
+    assert bid_for(cards_of(STRONG), thresholds=loose).value == 3
+    assert bid_for(cards_of(STRONG), thresholds=strict).value == 3
+    assert bid_for(cards_of(WEAK), thresholds=loose).value == 0
+    assert bid_for(cards_of(WEAK), thresholds=strict).value == 0
 
 
-def test_default_policy_only_bids_three_or_passes():
+def test_strict_tier_maps_strength_to_bid_without_gaps():
+    """随机牌在严档下：够 12 分才叫 3，不够 4 分就不叫——中间不许出现"跳档"。"""
     rng = random.Random(20261009)
+    strict = thresholds_of_tier("strict")
     seen = set()
     for _ in range(400):
         hand = random_hand(rng, 17)
-        bid = bid_for(hand, legal=[0, 1, 2, 3])
+        bid = bid_for(hand, legal=[0, 1, 2, 3], thresholds=strict)
         seen.add(bid.value)
-        assert bid.value in (0, 3), f"自愿叫分只能是 3 或不叫，却叫了 {bid.value}"
-        assert (bid.value == 3) == (bid.strength >= THRESHOLDS[2])
-    assert seen == {0, 3}, "随机牌里应当既有叫 3 的，也有不叫的，否则这个测试没在测什么"
+        assert (bid.value == 3) == (bid.strength >= strict.three)
+        assert (bid.value == 0) == (bid.strength < strict.one)
+    assert {0, 1, 3} <= seen, f"随机牌应当覆盖到不叫/叫 1/叫 3，实际只见到 {sorted(seen)}"
 
 
 def test_thresholds_are_configurable():
@@ -74,9 +85,13 @@ def test_legal_set_is_respected():
     assert bid_for(strong, high_bid=3, legal=[0]).value == 0
 
 
-def test_mid_strength_hand_passes_and_says_why():
-    bid = bid_for(cards_of(MEDIUM))
-    assert bid.value == 0 and "不叫" in bid.reasons[0]
+def test_mid_strength_hand_is_where_the_two_tiers_disagree():
+    """MEDIUM 牌力 +4.3：宽档叫 2 分，严档只叫 1 分。理由里都要写清叫了几分、牌力多少。"""
+    loose = bid_for(cards_of(MEDIUM), thresholds=thresholds_of_tier("loose"))
+    strict = bid_for(cards_of(MEDIUM), thresholds=thresholds_of_tier("strict"))
+    assert loose.value == 2 and strict.value == 1
+    assert "叫 2 分" in loose.reasons[0] and "叫 1 分" in strict.reasons[0]
+    assert f"{strict.strength:.1f}" in strict.reasons[0]
 
 
 def test_must_bid_forces_at_least_one():
@@ -135,14 +150,18 @@ def test_agent_bid_without_a_hand_is_safe():
 # --------------------------------------------------------------------- 门槛可配置（竞技场 A/B 用）
 
 
-def test_parse_thresholds_takes_one_number_or_three():
+def test_parse_thresholds_takes_tier_names_one_number_or_three():
     from ddz.engine.bidding import parse_thresholds
 
-    same = parse_thresholds("10")
-    assert same == BidThresholds(10.0, 10.0, 10.0)
-    assert parse_thresholds(" 6, 8 ,10 ") == BidThresholds(6.0, 8.0, 10.0)
-    with pytest.raises(ValueError):
-        parse_thresholds("6,8")
+    assert parse_thresholds("strict") == thresholds_of_tier("strict")
+    assert parse_thresholds(" 严 ") == thresholds_of_tier("strict")
+    assert parse_thresholds("conservative") == thresholds_of_tier("strict")   # 旧脚本的别名
+    assert parse_thresholds("loose") == BidThresholds(*THRESHOLDS)
+    assert parse_thresholds("10") == BidThresholds(10.0, 10.0, 10.0)
+    assert parse_thresholds(" 4, 8 ,12 ") == BidThresholds(4.0, 8.0, 12.0)
+    for bad in ("6,8", "", "严格一点", "1,2,3,4"):
+        with pytest.raises(ValueError):
+            parse_thresholds(bad)
 
 
 def test_heuristic_agent_bids_with_its_own_thresholds():
@@ -151,6 +170,12 @@ def test_heuristic_agent_bids_with_its_own_thresholds():
     state.high_bid = 0
     state.must_bid = False
     assert HeuristicAgent().bid(state).value == 0
-    generous = HeuristicAgent(bid_thresholds=(-99.0, -99.0, -99.0))
+    generous = HeuristicAgent(thresholds=(-99.0, -99.0, -99.0))
     assert generous.bid(state).value == 3
-    assert generous.bid_thresholds == BidThresholds(-99.0, -99.0, -99.0)
+    assert generous.thresholds == BidThresholds(-99.0, -99.0, -99.0)
+
+    # 产品默认那一档（严）也要能从 agent 传进去：MEDIUM 在宽档叫 2、严档叫 1
+    medium = game_state(cards_of(MEDIUM), phase=PHASE_BIDDING, turn=0, landlord=None)
+    medium.high_bid, medium.must_bid = 0, False
+    assert HeuristicAgent().bid(medium).value == 2
+    assert HeuristicAgent(thresholds=thresholds_of_tier("strict")).bid(medium).value == 1

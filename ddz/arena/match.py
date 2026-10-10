@@ -43,8 +43,8 @@ def _make_agent(name: str, agent_kwargs: dict | None, cache: dict):
     return cache[key]
 
 
-def _takes_bid_thresholds(name: str) -> bool:
-    """叫分门槛只对启发式和 DouZero（它的兜底启发式）有意义。"""
+def _takes_thresholds(name: str) -> bool:
+    """叫分阈值只对启发式和 DouZero（它的兜底启发式）有意义；random 不接受这个参数。"""
     lowered = name.strip().lower()
     return lowered in _HEURISTIC_ALIASES or lowered.startswith("douzero")
 
@@ -134,7 +134,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         except ValueError as exc:
             parser.error(str(exc))
         agent_kwargs = {
-            name: {"bid_thresholds": thresholds} for name in players if _takes_bid_thresholds(name)
+            name: {"thresholds": thresholds} for name in players if _takes_thresholds(name)
         }
 
     started = time.time()
